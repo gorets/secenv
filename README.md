@@ -512,6 +512,10 @@ its children can read the secrets from their environment (for example with `env`
 | Node reports `<file>: not found` for `--env-file` | The secenv flag is `--env`; Node intercepts `--env-file` itself. Inside your own `node` scripts, drop `--env-file=.env`: secenv already loaded it |
 | A command killed by a signal | `secenv run` exits with `128 + signal number` (for example 143 for SIGTERM), like a shell would |
 
+## For AI coding agents
+
+[`.agents/skills/secenv/SKILL.md`](.agents/skills/secenv/SKILL.md) teaches coding agents how to work in a project that uses secenv: run commands through `secenv run`, batch Touch ID prompts, leave storing secrets and approving directories to the human, and never print values. Copy it into a project's `.agents/skills/` (or your agent's skills directory) to use it there.
+
 ## Uninstall
 
 Installed from npm:
