@@ -40,7 +40,7 @@ Setup
 Secrets
   set <profile> KEY...     enter secret values (hidden input)
   import <profile> [file]  import keys from a .env file, then reference them
-  list <profile>           print secret names (never values)
+  list [<profile>]         list profiles, or the secret names of one (ls works too)
   get <profile> KEY        print one secret value (terminal only)
   rm <profile> KEY...      remove secrets
 
@@ -113,7 +113,7 @@ several keys take one line each:
 Reads a .env file (default ./.env), lets you pick which variables to store in
 the profile, then offers to replace their values in the file with
 secenv://<profile>/KEY references, so the file holds no secrets and can be
-committed. Lines that already hold references are skipped.
+committed. Empty values and lines that already hold references are skipped.
 
   --all             import every variable, no picker (default without a terminal)
   --only KEY,KEY    import only these, no picker
@@ -122,10 +122,10 @@ committed. Lines that already hold references are skipped.
 
 Rewriting does not wipe the old bytes from the disk: rotate keys that matter.`,
 
-  list: `usage: secenv list <profile>
+  list: `usage: secenv list [<profile>]   (ls works too)
 
-Prints the names of the secrets in a profile, never the values (Touch ID).
-For the list of profiles use \`secenv profile ls\`.`,
+Without a profile: lists the profiles (no Touch ID). With one: prints the
+names of its secrets, never the values (Touch ID).`,
 
   get: `usage: secenv get <profile> KEY [--allow-pipe]
        secenv get <profile>/KEY [--allow-pipe]
@@ -144,14 +144,15 @@ Removes secrets from a profile (Touch ID). To delete a whole profile use
 
   profile: `usage: secenv profile <action>
 
-  ls                          list profiles
+  ls                          list profiles (list works too)
+  <name> [ls]                 list the secrets of a profile (same as secenv ls <name>)
   rm <name> [--yes]           delete a profile and all its secrets (asks)
   mv <old> <new>              rename a profile
   cp <src> <dst>              copy a profile
   export <name> [--out <file>] [--allow-pipe]
                               print a profile in .env format (Touch ID);
                               --out writes a 0600 file instead
-  trust ls [<profile>]        list directories approved to use a profile
+  trust ls [<profile>]        list directories approved to use a profile (list works too)
   trust rm <dir>              revoke a directory's approvals
   trust prune                 drop approvals of deleted directories
 
@@ -164,7 +165,9 @@ Decrypts the profile (Touch ID) and runs the command with the secrets in its
 environment. Nothing is written to disk. The exit code is the command's.
 
 Profile, in this order: the argument, $SECENV_PROFILE, ./.secenv (one line),
-or secenv://<profile>/KEY references in the env file.
+or secenv://<profile>/KEY references in the env file. References may name
+other profiles too, but each profile is a separate decryption (one Touch ID
+each): keep one profile per project.
 
 Env file: ./.env is read like dotenv when present (or the file given with
 --env). A value secenv://KEY or secenv://<profile>/KEY is replaced with that
@@ -185,6 +188,7 @@ Examples:
 };
 
 function help(cmd) {
+  if (cmd === 'ls') cmd = 'list';
   process.stdout.write(cmd && HELP[cmd] ? `${HELP[cmd]}\n` : USAGE);
   process.exit(0);
 }
@@ -539,12 +543,18 @@ async function cmdImport(args) {
   if (!fs.existsSync(file)) usageError('import', `file not found: ${file}`);
 
   const parsed = parseDotenv(fs.readFileSync(file, 'utf8'));
-  // Lines that already reference secenv are skipped: nothing to import there.
-  const candidates = Object.keys(parsed).filter((k) => !parsed[k].startsWith('secenv://'));
-  if (!candidates.length) die(`no importable variables in ${file} (values that are already secenv:// references are skipped)`);
+  // Skipped: lines that already reference secenv (nothing to import) and
+  // empty values (a placeholder, not a secret; stored it would only make the
+  // variable look set).
+  const empty = Object.keys(parsed).filter((k) => parsed[k] === '');
+  const candidates = Object.keys(parsed).filter((k) => parsed[k] !== '' && !parsed[k].startsWith('secenv://'));
+  if (empty.length) process.stderr.write(`secenv: skipping empty: ${empty.join(', ')}\n`);
+  if (!candidates.length) die(`no importable variables in ${file} (empty values and existing secenv:// references are skipped)`);
 
   let keys;
   if (only) {
+    const isEmpty = only.filter((k) => empty.includes(k));
+    if (isEmpty.length) die(`empty in ${file}, nothing to import: ${isEmpty.join(', ')}`);
     const unknown = only.filter((k) => !candidates.includes(k));
     if (unknown.length) die(`not in ${file}: ${unknown.join(', ')}`);
     keys = only;
@@ -747,13 +757,20 @@ async function cmdProfile(args) {
       return cmdProfileExport(pos[0], { allowPipe, out });
     case 'trust': {
       const [sub, ...targs] = pos;
-      if (sub === 'ls' && targs.length <= 1) return cmdTrustLs(targs[0]);
+      if ((sub === 'ls' || sub === 'list') && targs.length <= 1) return cmdTrustLs(targs[0]);
       if (sub === 'rm' && targs.length === 1) return cmdTrustRm(targs[0]);
       if (sub === 'prune' && !targs.length) return cmdTrustPrune();
       usageError('profile', sub ? `trust ${sub}: wrong arguments` : 'trust: missing action (ls, rm, prune)', sub ? `trust ${sub}` : undefined);
     }
-    default:
-      usageError('profile', action ? `unknown action: ${action}` : 'missing action');
+    default: {
+      // `secenv profile <name>` / `secenv profile <name> ls`: the keys of that
+      // profile, same as `secenv list <name>`. Actions win over profile names.
+      if (action && PROFILE_NAME.test(action) && fs.existsSync(path.join(STORE, `${action}.age`))) {
+        if (!pos.length || (pos.length === 1 && (pos[0] === 'ls' || pos[0] === 'list'))) return cmdList(action);
+        usageError('profile', `${action} is a profile; to list its secrets: secenv profile ${action}`);
+      }
+      usageError('profile', action ? `unknown action or profile: ${action}` : 'missing action');
+    }
   }
 }
 
@@ -943,43 +960,73 @@ async function cmdRun(args) {
   }
   if (!profile) {
     profile = projectProfile();
-    source = '.secenv';
+    source = profile ? '.secenv' : `${envFile} reference`;
   }
-  // References may name the profile themselves: KEY=secenv://myapp/NAME.
+  // References may name a profile themselves: KEY=secenv://myapp/NAME. The
+  // main profile (argument, SECENV_PROFILE, .secenv) serves references without
+  // one; when there is no main profile, the references must agree on one.
   const refProfiles = [...new Set(Object.values(refs).map((r) => r.profile).filter(Boolean))];
-  if (refProfiles.length > 1) die(`${envFile} references several profiles: ${refProfiles.join(', ')}`);
-  if (!profile && refProfiles.length) {
+  const bare = Object.values(refs).some((r) => !r.profile);
+  if (!profile && refProfiles.length === 1) {
     profile = refProfiles[0];
     source = `${envFile} reference`;
   }
-  if (!profile) die('no profile specified (argument, SECENV_PROFILE, .secenv or secenv://<profile>/KEY in .env)');
-  profileFile(profile); // validate the name before it is shown anywhere
-  if (refProfiles.length && refProfiles[0] !== profile) {
-    die(`${envFile} references profile "${refProfiles[0]}", but the run uses "${profile}"`);
+  if (!profile && refProfiles.length > 1 && bare) {
+    die(`${envFile} mixes secenv://KEY with references to several profiles; name the profile in every reference or pass one`);
   }
-
-  // Which secrets the child gets: the explicit <profile>/KEY list, else exactly
-  // the referenced ones, else the whole profile.
-  const refNames = [...new Set(Object.values(refs).map((r) => r.name))];
+  if (!profile && !refProfiles.length) {
+    die('no profile specified (argument, SECENV_PROFILE, .secenv or secenv://<profile>/KEY in .env)');
+  }
+  if (profile) profileFile(profile); // validate the name before it is shown anywhere
+  for (const r of Object.values(refs)) r.profile ??= profile;
+  // Secrets wanted per profile: the explicit <profile>/KEY list, else exactly
+  // the referenced names, else the whole main profile.
+  const wanted = new Map(); // profile -> array of names, or null for "all"
   if (only) {
-    const outside = refNames.filter((n) => !only.includes(n));
-    if (outside.length) die(`${envFile} references secrets outside the allowed list: ${outside.join(', ')}`);
+    const outside = Object.values(refs).filter((r) => r.profile !== profile || !only.includes(r.name));
+    if (outside.length) {
+      die(`${envFile} references secrets outside the allowed list: ${outside.map((r) => `${r.profile}/${r.name}`).join(', ')}`);
+    }
+    wanted.set(profile, only);
+  } else if (Object.keys(refs).length) {
+    for (const r of Object.values(refs)) {
+      if (!wanted.has(r.profile)) wanted.set(r.profile, []);
+      if (!wanted.get(r.profile).includes(r.name)) wanted.get(r.profile).push(r.name);
+    }
+  } else {
+    wanted.set(profile, null);
   }
-  const wanted = only ?? (refNames.length ? refNames : null);
+  for (const name of wanted.keys()) profileFile(name);
 
-  await approveRun(profile, source, cmd);
+  const profiles = [...wanted.keys()];
+  if (profiles.length > 1) {
+    process.stderr.write(
+      `secenv: warning: ${envFile} references ${profiles.length} profiles (${profiles.join(', ')}). ` +
+        `Each one is a separate decryption, so expect ${profiles.length} Touch ID prompts per run. ` +
+        'Prefer one profile per project: secenv set <project> KEY..., or secenv import <project>.\n',
+    );
+  }
+
+  // All approvals first, then the decryptions: no prompts between Touch ID dialogs.
+  for (const name of profiles) await approveRun(name, name === profile ? source : `${envFile} reference`, cmd);
   // The Touch ID dialog carries no context; this line is what the user can check.
-  process.stderr.write(`secenv: ${profile}${wanted ? '/' + wanted.join(',') : ''} (${source}) -> ${cmd.join(' ')}\n`);
+  const shown = profiles.map((name) => (wanted.get(name) ? `${name}/${wanted.get(name).join(',')}` : name)).join(' ');
+  process.stderr.write(`secenv: ${shown} (${source}) -> ${cmd.join(' ')}\n`);
 
-  const all = loadProfile(profile, { mustExist: true });
-  if (wanted) {
-    const missing = wanted.filter((k) => !(k in all));
-    if (missing.length) die(`not found in profile "${profile}": ${missing.join(', ')}`);
+  const loaded = new Map();
+  for (const name of profiles) {
+    const all = loadProfile(name, { mustExist: true });
+    const names = wanted.get(name);
+    if (names) {
+      const missing = names.filter((k) => !(k in all));
+      if (missing.length) die(`not found in profile "${name}": ${missing.join(', ')}`);
+    }
+    loaded.set(name, all);
   }
   const secrets = {};
-  if (only) for (const k of only) secrets[k] = all[k];
-  else if (!refNames.length) Object.assign(secrets, all);
-  for (const [k, r] of Object.entries(refs)) secrets[k] = all[r.name];
+  if (only) for (const k of only) secrets[k] = loaded.get(profile)[k];
+  else if (!Object.keys(refs).length) Object.assign(secrets, loaded.get(profile));
+  for (const [k, r] of Object.entries(refs)) secrets[k] = loaded.get(r.profile)[r.name];
   const env = { ...process.env, ...plain, ...secrets };
 
   const child = spawn(cmd[0], cmd.slice(1), { env, stdio: 'inherit' });
@@ -1175,7 +1222,7 @@ if (isMain) {
   // command after it may well take --help itself.
   const own = cmd === 'run' ? rest.slice(0, rest.indexOf('--') === -1 ? rest.length : rest.indexOf('--')) : rest;
   if (cmd === 'help' || cmd === '-h' || cmd === '--help' || cmd === undefined) help(rest[0]);
-  if (own.includes('--help') || own.includes('-h')) help(HELP[cmd] ? cmd : undefined);
+  if (own.includes('--help') || own.includes('-h')) help(HELP[cmd] || cmd === 'ls' ? cmd : undefined);
   // Tighten an existing data directory that was created with a wider mode.
   for (const dir of [HOME, STORE]) if (fs.existsSync(dir)) ensureDir(dir);
   switch (cmd) {
@@ -1209,9 +1256,11 @@ if (isMain) {
     case 'profiles':
       await cmdProfile(cmd === 'profiles' && !rest.length ? ['ls'] : rest);
       break;
+    case 'ls':
     case 'list':
-      if (!rest[0]) usageError('list', 'missing profile (for all profiles: secenv profile ls)');
-      cmdList(rest[0]);
+      if (!rest[0]) cmdProfiles();
+      else if (rest.length > 1) usageError('list', `unexpected argument: ${rest[1]}`);
+      else cmdList(rest[0]);
       break;
     case 'get':
       cmdGet(rest);

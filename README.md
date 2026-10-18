@@ -64,7 +64,7 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-npm i -g @vladimir.gorobets/secenv@0.6.0   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.6.1   # pin the version: this tool sees all your secrets
 secenv setup
 ```
 
@@ -76,7 +76,7 @@ secenv setup
 - installs the zsh completion into Homebrew's `site-functions`, or tells you to
   add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.6.0 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.6.1 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
@@ -201,7 +201,7 @@ Every command answers `--help` (`secenv run --help`, `secenv profile --help`).
 | `secenv profile cp <src> <dst>` | Copy a profile |
 | `secenv profile export <name> [--out <file>]` | Print a profile in `.env` format (terminal only), or write it to a `0600` file |
 | `secenv profile trust ls\|rm\|prune` | View and revoke directory approvals (see below) |
-| `secenv list <profile>` | Print secret names (never values) |
+| `secenv list [<profile>]` | Without a profile: list profiles. With one: print its secret names (never values). `ls` works everywhere `list` does, and `secenv profile <name>` does the same as `secenv list <name>` |
 | `secenv get <profile> KEY` | Print one secret value. Terminal only (see below) |
 | `secenv rm <profile> KEY [KEY...]` | Remove secrets from a profile |
 | `secenv run [<profile>] [--env <file>\|--no-env] -- <command...>` | Run a command with secrets in its environment; reads `./.env` by default |
@@ -254,8 +254,8 @@ avoids the plaintext file altogether.
 
 `secenv import <profile>` reads `./.env` (or the file you name), shows a
 checklist of its variables (space toggles, `a` toggles all, enter confirms) and
-stores the selected ones in the profile. Lines that are already `secenv://`
-references are skipped. It then offers to rewrite the file: the imported values
+stores the selected ones in the profile. Empty values (`KEY=`) and lines that
+are already `secenv://` references are skipped. It then offers to rewrite the file: the imported values
 are replaced with `secenv://<profile>/KEY`, every other line stays as it is, so
 the file holds no secrets and can be committed.
 
@@ -287,9 +287,13 @@ MODEL=gpt-4.1
 secenv run -- npm start          # profile myai comes from the references
 ```
 
-- When the references name a profile, no other profile source is needed. All
-  references must use the same profile, and it must match the profile from the
-  argument, `SECENV_PROFILE` or `.secenv` if one of those is given too.
+- When the references name a profile, no other profile source is needed.
+  `secenv://KEY` without a profile uses the run's profile (argument,
+  `SECENV_PROFILE` or `.secenv`).
+- References may point at several profiles. It works, but each profile is a
+  separate decryption, so every run asks for Touch ID once per profile, and
+  secenv prints a warning. Keep one profile per project instead: a profile is
+  the set of secrets a project needs, not one per provider.
 - When a file contains references, the command receives only the referenced
   secrets (under the names on the left-hand side), not the whole profile. A
   reference to a missing secret is an error.

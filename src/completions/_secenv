@@ -19,7 +19,8 @@ _secenv() {
     'set:enter secret values'
     'import:import an existing .env file'
     'profile:manage profiles (ls, rm, mv, cp, export, trust)'
-    'list:list secret names'
+    'list:list profiles, or the secrets of one'
+    'ls:same as list'
     'get:print one secret value (terminal only)'
     'rm:remove secrets'
     'run:run a command with secrets in its environment'
@@ -31,12 +32,14 @@ _secenv() {
   fi
 
   case $words[2] in
-    set|list|rm|get)
+    set|list|ls|rm|get)
       (( CURRENT == 3 )) && _secenv_profiles
       ;;
     profile|profiles)
       if (( CURRENT == 3 )); then
-        _values 'action' 'ls[list profiles]' 'rm[delete a profile]' 'mv[rename a profile]' 'cp[copy a profile]' 'export[print a profile in .env format]' 'trust[manage .secenv approvals]'
+        _alternative \
+          'actions:action:((ls\:"list profiles" rm\:"delete a profile" mv\:"rename a profile" cp\:"copy a profile" export\:"print a profile in .env format" trust\:"manage directory approvals"))' \
+          'profiles:profile:_secenv_profiles'
       elif (( CURRENT == 4 )) && [[ $words[3] == (rm|mv|cp|export) ]]; then
         _secenv_profiles
       elif [[ $words[3] == export && $words[CURRENT-1] == --out ]]; then
@@ -44,10 +47,10 @@ _secenv() {
       elif (( CURRENT > 4 )) && [[ $words[3] == export ]]; then
         _values 'option' '--out[write a 0600 file]' '--allow-pipe[allow writing into a pipe]'
       elif (( CURRENT == 4 )) && [[ $words[3] == trust ]]; then
-        _values 'trust action' 'ls[list approved projects]' 'rm[revoke an approval]' 'prune[remove approvals of deleted projects]'
+        _values 'trust action' 'ls[list approved directories]' 'list[same as ls]' 'rm[revoke an approval]' 'prune[remove approvals of deleted directories]'
       elif (( CURRENT == 5 )) && [[ $words[3] == trust ]]; then
         case $words[4] in
-          ls) _secenv_profiles ;;
+          ls|list) _secenv_profiles ;;
           rm) _directories ;;
         esac
       fi

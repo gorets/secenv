@@ -4,6 +4,21 @@ All notable changes to secenv. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-10-18
+
+### Changed
+
+- `run` accepts `.env` references to several profiles (each one is a separate
+  decryption and Touch ID prompt; a warning says so and recommends one profile
+  per project). Approvals are collected before the first decryption.
+- `ls` and `list` are interchangeable everywhere: `secenv ls`, `secenv list
+  <profile>`, `secenv profile list`, `secenv profile trust list`. `secenv ls`
+  without a profile lists the profiles; `secenv profile <name>` and
+  `secenv profile <name> ls` list the secrets of that profile.
+- `import` skips empty values (`KEY=`): they are placeholders, and stored they
+  would only make the variable look set. They are listed as skipped and are
+  not offered in the picker; `--only` on one of them is an error.
+
 ## [0.6.0] - 2026-10-18
 
 ### Added
@@ -122,6 +137,7 @@ First published version.
 - `--public-env` for non-secret variables.
 - zsh completion, `install.sh` and `uninstall.sh`.
 
+[0.6.1]: https://github.com/gorets/secenv/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/gorets/secenv/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/gorets/secenv/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gorets/secenv/compare/v0.3.0...v0.4.0
