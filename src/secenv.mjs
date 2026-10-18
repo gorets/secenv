@@ -19,11 +19,16 @@ const IDENTITY = path.join(HOME, 'identity.txt');
 const RECIPIENT = path.join(HOME, 'recipient.txt');
 const STORE = path.join(HOME, 'profiles');
 const TRUSTED = path.join(HOME, 'trusted.json');
+// Present in the npm package and the repository; install.sh copies only this
+// script and installs the completion itself.
+const COMPLETION_FILE = fileURLToPath(new URL('./completions/_secenv', import.meta.url));
 
 const USAGE = `secenv — personal secrets encrypted with a Secure Enclave key (Touch ID)
 
 Commands:
+  secenv setup                        install age + age-plugin-se, create the key, set up completion
   secenv init                         create the Secure Enclave key (once)
+  secenv completion zsh               print the zsh completion script
   secenv set <profile> KEY [KEY...]   enter secret values (hidden input)
   secenv import <profile> <.env>      import an existing .env file
   secenv profile ls                   list profiles
@@ -249,7 +254,7 @@ function cmdInit() {
       { stdio: ['ignore', 'inherit', 'inherit'] },
     );
   }
-  if (r.status !== 0) die('could not create the key');
+  if (r.status !== 0 || !fs.existsSync(IDENTITY)) die('could not create the key');
   fs.chmodSync(IDENTITY, 0o600);
   const text = fs.readFileSync(IDENTITY, 'utf8');
   const m = text.match(/public key:\s*(age1\S+)/i);
@@ -589,6 +594,65 @@ async function cmdRun(args) {
   });
 }
 
+// ---------- setup ----------
+
+function cmdCompletion(shell) {
+  if (shell !== 'zsh') die('usage: secenv completion zsh   (only zsh is supported)');
+  if (!fs.existsSync(COMPLETION_FILE)) {
+    die('completion file not found next to secenv. If you installed with install.sh, it already set up the completion.');
+  }
+  process.stdout.write(fs.readFileSync(COMPLETION_FILE, 'utf8'));
+}
+
+function has(cmd) {
+  return !spawnSync(cmd, ['--version'], { stdio: 'ignore' }).error;
+}
+
+function brewPrefix() {
+  const r = spawnSync('brew', ['--prefix'], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+// One-shot setup for npm installs: dependencies, key, completion.
+// Safe to re-run: every step skips what is already in place.
+async function cmdSetup() {
+  if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+    die('secenv needs a Mac with Apple Silicon (Secure Enclave and Touch ID).');
+  }
+
+  const missing = ['age', 'age-plugin-se'].filter((c) => !has(c));
+  if (missing.length) {
+    const brew = brewPrefix();
+    const install = `brew install ${missing.join(' ')}`;
+    if (!brew) die(`missing: ${missing.join(', ')}. Install Homebrew (https://brew.sh), then run: ${install}`);
+    if (!process.stdin.isTTY) die(`missing: ${missing.join(', ')}. Run: ${install}`);
+    if (!(await confirm(`Missing ${missing.join(', ')}. Run "${install}" now?`))) die(`cancelled. Run: ${install}`);
+    const r = spawnSync('brew', ['install', ...missing], { stdio: 'inherit' });
+    const still = missing.filter((c) => !has(c));
+    if (r.status !== 0 || still.length) die(`"${install}" failed; still missing: ${still.join(', ') || missing.join(', ')}`);
+  }
+  console.log('✓ age and age-plugin-se installed');
+
+  cmdInit();
+
+  const brew = brewPrefix();
+  const compDir = brew && path.join(brew, 'share', 'zsh', 'site-functions');
+  if (!fs.existsSync(COMPLETION_FILE)) {
+    console.log('• zsh completion: skipped (installed by install.sh)');
+  } else if (compDir && fs.existsSync(compDir)) {
+    try {
+      fs.copyFileSync(COMPLETION_FILE, path.join(compDir, '_secenv'));
+      console.log(`✓ zsh completion -> ${compDir}/_secenv (open a new terminal)`);
+    } catch {
+      console.log('• zsh completion: could not write it; add to ~/.zshrc after compinit:');
+      console.log('    source <(secenv completion zsh)');
+    }
+  } else {
+    console.log('• zsh completion: add to ~/.zshrc after compinit:');
+    console.log('    source <(secenv completion zsh)');
+  }
+}
+
 // ---------- main ----------
 
 const isMain =
@@ -598,6 +662,12 @@ if (isMain) {
   switch (cmd) {
     case 'init':
       cmdInit();
+      break;
+    case 'setup':
+      await cmdSetup();
+      break;
+    case 'completion':
+      cmdCompletion(rest[0]);
       break;
     case 'set': {
       const { name, keys } = splitProfileKeys(rest);

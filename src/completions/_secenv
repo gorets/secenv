@@ -12,7 +12,9 @@ _secenv_profiles() {
 _secenv() {
   local -a cmds
   cmds=(
+    'setup:install dependencies, create the key, set up completion'
     'init:create the Secure Enclave key'
+    'completion:print the shell completion script'
     'set:enter secret values'
     'import:import an existing .env file'
     'profile:manage profiles (ls, rm, mv, cp, export, trust)'
@@ -45,6 +47,9 @@ _secenv() {
         esac
       fi
       ;;
+    completion)
+      (( CURRENT == 3 )) && _values 'shell' zsh
+      ;;
     import)
       if (( CURRENT == 3 )); then
         _secenv_profiles
@@ -74,4 +79,10 @@ _secenv() {
   esac
 }
 
-_secenv "$@"
+# Autoloaded from fpath: run as the completion function. Sourced (for example
+# `source <(secenv completion zsh)` after compinit): register it instead.
+if [[ $funcstack[1] == _secenv ]]; then
+  _secenv "$@"
+else
+  compdef _secenv secenv
+fi

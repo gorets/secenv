@@ -64,23 +64,39 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-brew install age age-plugin-se    # npm cannot install these
-npm i -g @vladimir.gorobets/secenv@0.3.0   # pin the version: this tool sees all your secrets
-secenv init                       # create the Secure Enclave key (once)
+npm i -g @vladimir.gorobets/secenv@0.4.0   # pin the version: this tool sees all your secrets
+secenv setup
 ```
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.3.0 run myapp -- node app.js`. `npx`
+`secenv setup` does the rest and is safe to re-run:
+
+- checks for `age` and `age-plugin-se` and offers to run `brew install` for the
+  missing ones (npm cannot install them);
+- creates the Secure Enclave key if there is none yet (`secenv init`);
+- installs the zsh completion into Homebrew's `site-functions`, or tells you to
+  add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
+
+Or run without installing: `npx @vladimir.gorobets/secenv@0.4.0 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
-secrets. Installing from npm works on Node 18+, but it does not set up the zsh
-completion; use `install.sh` for that.
+secrets. Installing from npm works on Node 18+.
+
+Use one installation method, not both: `install.sh` puts a copy in
+`~/.local/bin`, and if both exist the one earlier in `PATH` wins (check with
+`which -a secenv`).
 
 ### Shell completion (zsh)
 
 `install.sh` also installs a zsh completion to
-`$(brew --prefix)/share/zsh/site-functions/_secenv`. Open a new terminal to use
-it. It completes subcommands and profile names (read from file names, so no Touch
+`$(brew --prefix)/share/zsh/site-functions/_secenv` (with npm, `secenv setup`
+does the same). Open a new terminal to use it. Without Homebrew's directory, add
+this to `~/.zshrc` after `compinit`:
+
+```bash
+source <(secenv completion zsh)
+```
+ It completes subcommands and profile names (read from file names, so no Touch
 ID prompt), and after `--` it hands off to the wrapped command's own completion,
 so `secenv run myapp -- npm run <Tab>` works as usual.
 
@@ -156,7 +172,9 @@ In `package.json`:
 
 | Command | Description |
 | --- | --- |
-| `secenv init` | Create the Secure Enclave key (once; `install.sh` does this) |
+| `secenv setup` | Install `age` + `age-plugin-se`, create the key, set up completion (for npm installs; safe to re-run) |
+| `secenv init` | Create the Secure Enclave key (once; `install.sh` and `setup` do this) |
+| `secenv completion zsh` | Print the zsh completion script |
 | `secenv set <profile> KEY [KEY...]` | Enter secret values (hidden input); updates existing keys |
 | `secenv import <profile> <file>` | Import a `.env` file, merging into the profile |
 | `secenv profile ls` | List profiles; `secenv profiles` is an alias |
@@ -394,6 +412,16 @@ its children can read the secrets from their environment (for example with `env`
 | A command killed by a signal | `secenv run` exits with `128 + signal number` (for example 143 for SIGTERM), like a shell would |
 
 ## Uninstall
+
+Installed from npm:
+
+```bash
+npm uninstall -g @vladimir.gorobets/secenv
+rm -f "$(brew --prefix)/share/zsh/site-functions/_secenv"   # if setup installed it
+rm -r ~/.config/secenv      # optional: deletes all encrypted profiles for good
+```
+
+Installed with `install.sh`:
 
 ```bash
 ./uninstall.sh              # asks before deleting your encrypted profiles
