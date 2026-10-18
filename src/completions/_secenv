@@ -23,6 +23,8 @@ _secenv() {
     'ls:same as list'
     'get:print one secret value (terminal only)'
     'rm:remove secrets'
+    'cp:copy one secret to another profile'
+    'mv:move or rename one secret'
     'run:run a command with secrets in its environment'
   )
 
@@ -32,6 +34,9 @@ _secenv() {
   fi
 
   case $words[2] in
+    cp|mv)
+      (( CURRENT <= 4 )) && _secenv_profiles
+      ;;
     set|list|ls|rm|get)
       (( CURRENT == 3 )) && _secenv_profiles
       ;;

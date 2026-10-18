@@ -64,7 +64,7 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-npm i -g @vladimir.gorobets/secenv@0.6.1   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.6.2   # pin the version: this tool sees all your secrets
 secenv setup
 ```
 
@@ -76,7 +76,7 @@ secenv setup
 - installs the zsh completion into Homebrew's `site-functions`, or tells you to
   add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.6.1 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.6.2 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
@@ -204,6 +204,8 @@ Every command answers `--help` (`secenv run --help`, `secenv profile --help`).
 | `secenv list [<profile>]` | Without a profile: list profiles. With one: print its secret names (never values). `ls` works everywhere `list` does, and `secenv profile <name>` does the same as `secenv list <name>` |
 | `secenv get <profile> KEY` | Print one secret value. Terminal only (see below) |
 | `secenv rm <profile> KEY [KEY...]` | Remove secrets from a profile |
+| `secenv cp <profile>/KEY <profile>[/KEY]` | Copy one secret to another profile, optionally under a new name (one Touch ID per profile) |
+| `secenv mv <profile>/KEY <profile>[/KEY]` | Move one secret, or rename it inside a profile |
 | `secenv run [<profile>] [--env <file>\|--no-env] -- <command...>` | Run a command with secrets in its environment; reads `./.env` by default |
 
 `set`, `get` and `rm` also accept the `<profile>/KEY` form: `secenv set myapp/OPENAI_API_KEY`,

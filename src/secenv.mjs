@@ -43,6 +43,10 @@ Secrets
   list [<profile>]         list profiles, or the secret names of one (ls works too)
   get <profile> KEY        print one secret value (terminal only)
   rm <profile> KEY...      remove secrets
+  cp <profile>/KEY <profile>[/KEY]
+                           copy one secret to another profile (or name)
+  mv <profile>/KEY <profile>[/KEY]
+                           move or rename one secret
 
 Profiles
   profile ls|rm|mv|cp|export|trust
@@ -141,6 +145,21 @@ the environment:
 
 Removes secrets from a profile (Touch ID). To delete a whole profile use
 \`secenv profile rm <profile>\`.`,
+
+  cp: `usage: secenv cp <profile>/KEY <profile>[/KEY]
+
+Copies one secret into another profile, optionally under a new name. The
+destination profile is created if needed; an existing key there is not
+overwritten. Two profiles mean two decryptions (two Touch ID prompts).
+  secenv cp ai/OPENAI_API_KEY myai
+  secenv cp ai/OPENAI_API_KEY myai/OPENAI_KEY`,
+
+  mv: `usage: secenv mv <profile>/KEY <profile>[/KEY]
+
+Moves one secret to another profile, or renames it inside the same profile.
+Same rules as cp; the source key is removed afterwards.
+  secenv mv ai/OPENAI_API_KEY myai
+  secenv mv myai/OPENAI_KEY myai/OPENAI_API_KEY`,
 
   profile: `usage: secenv profile <action>
 
@@ -804,6 +823,34 @@ function cmdGet(args) {
   process.stdout.write(process.stdout.isTTY ? `${data[key]}\n` : data[key]);
 }
 
+// secenv cp|mv <profile>/KEY <profile>[/KEY]: one secret between profiles (or
+// a rename inside one). Each profile involved is one decryption.
+function cmdCopyKey(args, { move }) {
+  const verb = move ? 'mv' : 'cp';
+  if (args.length !== 2) usageError(verb, args.length < 2 ? 'need a source and a destination' : `unexpected argument: ${args[2]}`);
+  const src = splitProfileKeys([args[0]]);
+  if (!src.name || src.keys.length !== 1) usageError(verb, 'source must be <profile>/KEY');
+  const dst = splitProfileKeys([args[1]]);
+  if (!dst.name) usageError(verb, 'destination must be <profile> or <profile>/KEY');
+  const srcKey = src.keys[0];
+  const dstKey = dst.keys[0] ?? srcKey;
+  checkKey(srcKey);
+  checkKey(dstKey);
+  profileFile(dst.name);
+  if (src.name === dst.name && srcKey === dstKey) die('source and destination are the same');
+
+  const from = loadProfile(src.name, { mustExist: true });
+  if (!(srcKey in from)) die(`secret "${srcKey}" not found in profile "${src.name}"`);
+  const same = src.name === dst.name;
+  const to = same ? from : loadProfile(dst.name);
+  if (dstKey in to) die(`"${dstKey}" already exists in profile "${dst.name}"; remove it first: secenv rm ${dst.name}/${dstKey}`);
+  to[dstKey] = from[srcKey];
+  if (move) delete from[srcKey];
+  saveProfile(dst.name, to);
+  if (move && !same) saveProfile(src.name, from);
+  console.log(`${move ? 'Moved' : 'Copied'} ${src.name}/${srcKey} -> ${dst.name}/${dstKey}`);
+}
+
 function cmdRm(name, keys) {
   if (!name) usageError('rm', 'missing profile');
   if (!keys.length) usageError('rm', 'missing secret names');
@@ -1270,6 +1317,12 @@ if (isMain) {
       cmdRm(name, keys);
       break;
     }
+    case 'cp':
+      cmdCopyKey(rest, { move: false });
+      break;
+    case 'mv':
+      cmdCopyKey(rest, { move: true });
+      break;
     case 'run':
       await cmdRun(rest);
       break;

@@ -4,6 +4,14 @@ All notable changes to secenv. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-10-18
+
+### Added
+
+- `secenv cp <profile>/KEY <profile>[/KEY]` and `secenv mv …`: copy or move
+  one secret between profiles, or rename it inside one. Existing keys are not
+  overwritten.
+
 ## [0.6.1] - 2026-10-18
 
 ### Changed
@@ -137,6 +145,7 @@ First published version.
 - `--public-env` for non-secret variables.
 - zsh completion, `install.sh` and `uninstall.sh`.
 
+[0.6.2]: https://github.com/gorets/secenv/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/gorets/secenv/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/gorets/secenv/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/gorets/secenv/compare/v0.4.0...v0.5.0
