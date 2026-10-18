@@ -37,6 +37,11 @@ if command -v brew >/dev/null; then
 fi
 
 if [[ -d "$DATA_DIR" ]]; then
+  # Only remove something that looks like a secenv data directory.
+  if [[ ! -e "$DATA_DIR/identity.txt" && ! -d "$DATA_DIR/profiles" ]]; then
+    echo "✗ $DATA_DIR does not look like a secenv data directory (no identity.txt or profiles/); not touching it." >&2
+    exit 1
+  fi
   if [[ "$MODE" == ask ]]; then
     echo
     echo "$DATA_DIR holds the encrypted profiles and the reference to the Secure Enclave key."

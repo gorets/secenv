@@ -1,0 +1,109 @@
+# Changelog
+
+All notable changes to secenv. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/).
+
+## [0.5.0] - 2026-10-18
+
+### Security
+
+Fixes from the 2026-10-18 security audit (`reviews/`):
+
+- `run` asks for approval the first time a profile is used in a directory,
+  whatever named the profile (argument, `SECENV_PROFILE` or `.secenv`), and
+  prints `secenv: <profile> (<source>) -> <command>` before every decryption.
+  Previously only `.secenv` was gated, so a repository's `package.json` script
+  could name any profile directly. The question is asked on `/dev/tty`, so it
+  works with piped stdin. `trusted.json` now stores a list of profiles per
+  directory; the old single-profile format is still read.
+- `age`, `age-plugin-se` and `age-keygen` are resolved from fixed system
+  directories, never from `PATH`, and `age` runs with that `PATH`. Under
+  `npm run` the repository's `node_modules/.bin` is first on `PATH` and could
+  supply a fake `age` that sees the whole profile. `SECENV_TOOL_DIRS` overrides
+  the list.
+- `--public-env` ignores `PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*` and
+  `LD_*` with a warning; a repository-supplied file could otherwise choose which
+  binary receives the secrets.
+- `profile export --out <file>` writes the file itself with mode `0600`; a shell
+  redirect used the umask and left the plaintext world-readable.
+- `update` strips terminal escape sequences from fetched release notes, accepts
+  only a semver version from the registry, and passes `--ignore-scripts` to npm.
+- Profile names `.` and `..` are rejected; the data directory is re-tightened to
+  `0700` on every start; `trusted.json` with an unexpected shape is treated as
+  empty; the temporary file in `profiles/` is created with `wx`;
+  `SECENV_HOME` is resolved to an absolute path.
+
+### Added
+
+- `secenv update`: checks the latest version on npm, shows the release notes
+  and a GitHub compare link, asks for confirmation (`--yes` without a terminal)
+  and installs that exact version. `--check` only reports. Works for global npm
+  installs; refreshes the zsh completion installed by `setup`.
+- `secenv --version` (also `-v`, `version`).
+- This changelog, shipped in the npm package.
+
+## [0.4.0] - 2026-10-18
+
+### Added
+
+- `secenv setup`: checks `age` and `age-plugin-se` and offers `brew install`
+  for missing ones, creates the Secure Enclave key, installs the zsh
+  completion. Safe to re-run.
+- `secenv completion zsh`: prints the completion script. The script works both
+  autoloaded from `fpath` and sourced after `compinit`.
+
+### Fixed
+
+- `init` fails cleanly when key generation exits successfully without writing
+  the identity file.
+
+## [0.3.0] - 2026-10-18
+
+### Added
+
+- `secenv profile ls|rm|mv|cp`: manage profiles as files, no Touch ID needed.
+  `cp` and `mv` never overwrite; `mv` lists projects whose `.secenv` still names
+  the old profile; `rm` asks to confirm (`--yes` without a terminal).
+- `secenv profile export`: prints a profile in `.env` format, terminal only
+  unless `--allow-pipe`, for moving secrets to a new Mac.
+- `secenv profile trust ls|rm|prune`: view and revoke `.secenv` approvals.
+
+### Changed
+
+- `profile rm` also revokes the `.secenv` approvals of the deleted profile.
+- `list` without a profile points to `profile ls`.
+
+### Fixed
+
+- `.env` parsing unescapes in a single pass, so a literal backslash followed by
+  `n` survives `export` → `import`.
+
+## [0.2.0] - 2026-10-18
+
+### Added
+
+- `set`, `get` and `rm` accept `<profile>/KEY`.
+- `run` accepts one or more `<profile>/KEY` items and passes only those
+  secrets to the command.
+- npm package `@vladimir.gorobets/secenv`.
+
+## [0.1.0] - 2026-10-18
+
+First published version.
+
+### Added
+
+- Secrets encrypted with `age` to a Secure Enclave key; every decryption
+  requires Touch ID.
+- Commands `init`, `set`, `import`, `list`, `get`, `rm`, `run`.
+- `get` refuses to print into a pipe or `$(...)` unless `--allow-pipe`.
+- Project default profile via `.secenv`, used only after explicit approval.
+- `--public-env` for non-secret variables.
+- zsh completion, `install.sh` and `uninstall.sh`.
+
+[0.5.0]: https://github.com/gorets/secenv/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/gorets/secenv/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/gorets/secenv/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/gorets/secenv/tree/v0.2.0
+[0.1.0]: https://www.npmjs.com/package/@vladimir.gorobets/secenv/v/0.1.0

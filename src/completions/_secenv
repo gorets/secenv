@@ -5,7 +5,7 @@
 _secenv_profiles() {
   local dir=${SECENV_HOME:-$HOME/.config/secenv}/profiles
   local -a profiles
-  profiles=(${${(f)"$(command ls $dir 2>/dev/null)"}%.age})
+  profiles=(${${(f)"$(command ls -- "$dir" 2>/dev/null)"}%.age})
   _describe -t profiles 'profile' profiles
 }
 
@@ -15,6 +15,7 @@ _secenv() {
     'setup:install dependencies, create the key, set up completion'
     'init:create the Secure Enclave key'
     'completion:print the shell completion script'
+    'update:update a global npm install'
     'set:enter secret values'
     'import:import an existing .env file'
     'profile:manage profiles (ls, rm, mv, cp, export, trust)'
@@ -38,6 +39,10 @@ _secenv() {
         _values 'action' 'ls[list profiles]' 'rm[delete a profile]' 'mv[rename a profile]' 'cp[copy a profile]' 'export[print a profile in .env format]' 'trust[manage .secenv approvals]'
       elif (( CURRENT == 4 )) && [[ $words[3] == (rm|mv|cp|export) ]]; then
         _secenv_profiles
+      elif [[ $words[3] == export && $words[CURRENT-1] == --out ]]; then
+        _files
+      elif (( CURRENT > 4 )) && [[ $words[3] == export ]]; then
+        _values 'option' '--out[write a 0600 file]' '--allow-pipe[allow writing into a pipe]'
       elif (( CURRENT == 4 )) && [[ $words[3] == trust ]]; then
         _values 'trust action' 'ls[list approved projects]' 'rm[revoke an approval]' 'prune[remove approvals of deleted projects]'
       elif (( CURRENT == 5 )) && [[ $words[3] == trust ]]; then

@@ -64,7 +64,7 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-npm i -g @vladimir.gorobets/secenv@0.4.0   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.5.0   # pin the version: this tool sees all your secrets
 secenv setup
 ```
 
@@ -76,11 +76,25 @@ secenv setup
 - installs the zsh completion into Homebrew's `site-functions`, or tells you to
   add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.4.0 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.5.0 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
 secrets. Installing from npm works on Node 18+.
+
+To update later:
+
+```bash
+secenv update --check   # show the latest version and a link to the changes
+secenv update           # confirm, then npm install -g <exact version>
+```
+
+`update` never runs silently: it shows the version change, the release notes
+from [CHANGELOG.md](CHANGELOG.md) and a GitHub compare link, asks for confirmation (`--yes` without a terminal), and
+installs that exact version. It also refreshes the zsh completion installed by
+`setup`. It works only for a global npm install; with `install.sh`, update with
+`git pull && ./install.sh`, and with `npx` or a project dependency, bump the
+pinned version yourself.
 
 Use one installation method, not both: `install.sh` puts a copy in
 `~/.local/bin`, and if both exist the one earlier in `PATH` wins (check with
@@ -175,14 +189,16 @@ In `package.json`:
 | `secenv setup` | Install `age` + `age-plugin-se`, create the key, set up completion (for npm installs; safe to re-run) |
 | `secenv init` | Create the Secure Enclave key (once; `install.sh` and `setup` do this) |
 | `secenv completion zsh` | Print the zsh completion script |
+| `secenv update [--check] [--yes]` | Update a global npm install to the latest version (asks to confirm) |
+| `secenv --version` | Print the installed version |
 | `secenv set <profile> KEY [KEY...]` | Enter secret values (hidden input); updates existing keys |
 | `secenv import <profile> <file>` | Import a `.env` file, merging into the profile |
 | `secenv profile ls` | List profiles; `secenv profiles` is an alias |
 | `secenv profile rm <name> [--yes]` | Delete a profile with all its secrets (asks to confirm) |
 | `secenv profile mv <old> <new>` | Rename a profile |
 | `secenv profile cp <src> <dst>` | Copy a profile |
-| `secenv profile export <name>` | Print a profile in `.env` format. Terminal only (see below) |
-| `secenv profile trust ls\|rm\|prune` | View and revoke `.secenv` approvals of projects (see below) |
+| `secenv profile export <name> [--out <file>]` | Print a profile in `.env` format (terminal only), or write it to a `0600` file |
+| `secenv profile trust ls\|rm\|prune` | View and revoke directory approvals (see below) |
 | `secenv list <profile>` | Print secret names (never values) |
 | `secenv get <profile> KEY` | Print one secret value. Terminal only (see below) |
 | `secenv rm <profile> KEY [KEY...]` | Remove secrets from a profile |
@@ -216,12 +232,14 @@ secenv profile rm staging               # asks to confirm; --yes without a termi
 
 The Secure Enclave key cannot be moved, so the only way to carry secrets over is
 through plaintext. `profile export` prints a profile in `.env` format (Touch ID).
-Like `get`, it writes only to a terminal; writing into a file or pipe needs an
-explicit `--allow-pipe`:
+Like `get`, it writes only to a terminal. To write a file use `--out`, which
+creates it with mode `0600` and refuses to overwrite; a shell redirect would use
+your umask (usually `0644`, readable by every local account). A pipe needs an
+explicit `--allow-pipe`.
 
 ```bash
 # old Mac
-secenv profile export myapp --allow-pipe > myapp.env
+secenv profile export myapp --out myapp.env
 # copy myapp.env over a channel you trust, then on the new Mac
 secenv import myapp myapp.env && rm myapp.env
 ```
@@ -251,6 +269,9 @@ the command without the secret.
 2. the `SECENV_PROFILE` environment variable
 3. the `.secenv` file in the current directory (one line, the profile name)
 
+Whatever the source, the first use of that profile in the current directory
+asks for approval (see "Directory approvals").
+
 ### Variable precedence
 
 When the same name appears in several places, the later one wins:
@@ -259,35 +280,49 @@ When the same name appears in several places, the later one wins:
 2. `--public-env` file (non-secret variables such as `NODE_ENV` or `PORT`)
 3. the secret profile
 
-### The `.secenv` file and trust
+`PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*` and `LD_*` in a public env file are
+ignored with a warning: the file may come from the repository, and it must not
+decide which binary runs or what gets loaded into it.
 
-A `.secenv` file decides which secrets the launched code receives, so a cloned
-repository must not be able to choose that silently. The first time `secenv run`
-uses a `.secenv` in a directory, it asks:
+### Directory approvals
+
+The code you launch decides nothing; the directory you launch it from does. The
+first time `secenv run` uses a profile in a directory, however the profile was
+named (argument, `SECENV_PROFILE` or `.secenv`), it asks on your terminal:
 
 ```
-Project /path/to/project requests profile "wildix_dev". Allow? [y/N]
+secenv: first use of profile "wildix_dev" (argument) in /path/to/project
+  command: node app.js
+Allow this directory to use "wildix_dev" from now on? [y/N]
 ```
 
-The answer is remembered in `~/.config/secenv/trusted.json`. If `.secenv`
-changes (for example after `git pull`), it asks again. Without a terminal (CI,
-pipes) such a run is refused; pass the profile as an argument instead. If you are
-asked in a repository you do not know, answer `n`.
+This matters because a cloned repository can put `secenv run wildix_dev -- …`
+into its `package.json` just as easily as a profile name into `.secenv`, and the
+Touch ID dialog shows neither the profile nor the command. Read the two lines
+before answering: if you did not expect that profile or that command in that
+directory, answer `n`. Before every decryption `run` also prints one line,
+`secenv: <profile> (<source>) -> <command>`, which is what you can check while
+the Touch ID dialog is up.
+
+Approvals are stored per directory in `~/.config/secenv/trusted.json` (realpath
+of the directory → list of profiles). The question is asked on `/dev/tty`, so it
+works even when stdin is a pipe feeding the command; without any terminal (CI)
+an unapproved run is refused. Approving your home directory or `/tmp` is a bad
+idea: a script can `cd` there.
 
 To view or revoke approvals (no Touch ID):
 
 ```bash
-secenv profile trust ls            # every approved project and its profile
-secenv profile trust ls myapp      # only projects that use myapp
-secenv profile trust rm .          # revoke the current project (or pass a path)
-secenv profile trust prune         # drop approvals of deleted projects
+secenv profile trust ls            # every approved directory and its profiles
+secenv profile trust ls myapp      # only directories that may use myapp
+secenv profile trust rm .          # revoke the current directory (or pass a path)
+secenv profile trust prune         # drop approvals of deleted directories
 ```
 
 Revoke an approval when you answered `y` too quickly, when the code in that
 folder is no longer something you trust (for example a different repository was
-cloned into the same path), or when the project is gone. The next `secenv run`
-there asks again. `profile rm` revokes the approvals of the deleted profile by
-itself.
+cloned into the same path), or when the project is gone. `profile rm` revokes
+the approvals of the deleted profile by itself.
 
 ### Piping values
 
@@ -393,7 +428,12 @@ its children can read the secrets from their environment (for example with `env`
   approves Touch ID themselves. It only prevents reading secrets without your
   fingerprint, and keeps them out of plaintext files and shell history.
 - Only run `secenv run` with commands you trust. The launched code receives the
-  secrets.
+  secrets. The directory approval and the `secenv: <profile> -> <command>` line
+  exist so that you notice when a repository's script asks for a profile you did
+  not expect; they are not a sandbox.
+- `age` and `age-plugin-se` are run from fixed system directories
+  (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`), never from
+  `PATH`, so a repository cannot substitute them through `node_modules/.bin`.
 
 ## Troubleshooting
 
@@ -401,9 +441,10 @@ its children can read the secrets from their environment (for example with `env`
 | --- | --- |
 | `secenv: command not found` | Add `~/.local/bin` to `PATH` |
 | `key not created. Run: secenv init` | Run `secenv init` |
+| `"age" not found in /opt/homebrew/bin, /usr/local/bin, …` | secenv looks for `age` and `age-plugin-se` only in those directories, never in `PATH`; `brew install age age-plugin-se`, or set `SECENV_TOOL_DIRS` if they live elsewhere |
 | `could not decrypt (Touch ID cancelled or key does not match)` | Retry and approve Touch ID; if the key was recreated, the old profile is unrecoverable, so delete it and re-enter the secrets |
 | `profile "<name>" not found` | Create it with `secenv set <name> KEY` |
-| `.secenv ... is not confirmed` (no terminal) | Run once interactively, or pass the profile as an argument |
+| `profile "…" (…) is not approved for … and there is no terminal to ask` | Run it once from a terminal and answer `y` (approvals are per directory) |
 | `invalid profile name in .../.secenv` | The file must contain one line with a profile name (letters, digits, `.`, `-`, `_`) |
 | `refusing to print a secret into a pipe or $(...)` | Use `secenv run <profile> -- sh -c '...'` so the child shell expands the variable, or add `--allow-pipe` if you accept the `ps` exposure |
 | `--public-env requires a file` | Pass the file: `--public-env .env.public` |

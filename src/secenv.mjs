@@ -14,7 +14,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-const HOME = process.env.SECENV_HOME || path.join(os.homedir(), '.config', 'secenv');
+const HOME = path.resolve(process.env.SECENV_HOME || path.join(os.homedir(), '.config', 'secenv'));
 const IDENTITY = path.join(HOME, 'identity.txt');
 const RECIPIENT = path.join(HOME, 'recipient.txt');
 const STORE = path.join(HOME, 'profiles');
@@ -22,6 +22,8 @@ const TRUSTED = path.join(HOME, 'trusted.json');
 // Present in the npm package and the repository; install.sh copies only this
 // script and installs the completion itself.
 const COMPLETION_FILE = fileURLToPath(new URL('./completions/_secenv', import.meta.url));
+const PACKAGE_FILE = fileURLToPath(new URL('../package.json', import.meta.url));
+const REGISTRY = (process.env.SECENV_REGISTRY || 'https://registry.npmjs.org').replace(/\/$/, '');
 
 const USAGE = `secenv — personal secrets encrypted with a Secure Enclave key (Touch ID)
 
@@ -29,6 +31,8 @@ Commands:
   secenv setup                        install age + age-plugin-se, create the key, set up completion
   secenv init                         create the Secure Enclave key (once)
   secenv completion zsh               print the zsh completion script
+  secenv update [--check] [--yes]     update a global npm install (asks to confirm)
+  secenv --version                    print the installed version
   secenv set <profile> KEY [KEY...]   enter secret values (hidden input)
   secenv import <profile> <.env>      import an existing .env file
   secenv profile ls                   list profiles
@@ -36,7 +40,7 @@ Commands:
   secenv profile mv <old> <new>       rename a profile
   secenv profile cp <src> <dst>       copy a profile
   secenv profile export <name>        print a profile in .env format (terminal only)
-  secenv profile trust ls|rm|prune    manage .secenv approvals of projects
+  secenv profile trust ls|rm|prune    manage which directories may use which profiles
   secenv list <profile>               print secret names (never values)
   secenv get <profile> KEY            print one secret value (terminal only)
   secenv rm <profile> KEY [KEY...]    remove secrets
@@ -53,7 +57,10 @@ run accepts one or more <profile>/KEY items to pass only those secrets:
 
 The profile for run is optional: it is taken from the SECENV_PROFILE variable
 or from the .secenv file in the current directory (one line, the profile name).
---public-env loads NON-secret variables (NODE_ENV, PORT, ...) from a file.
+The first run of a profile in a directory asks for approval, however the profile
+was named; approvals are stored per directory (secenv profile trust ls).
+--public-env loads NON-secret variables (NODE_ENV, PORT, ...) from a file;
+PATH, NODE_OPTIONS, NODE_PATH, DYLD_* and LD_* in it are ignored.
 
 get refuses to write into a pipe or $(...) unless you add --allow-pipe: a secret
 passed as a command-line argument is visible to every process via ps. Prefer
@@ -67,12 +74,18 @@ function die(msg, code = 1) {
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // mkdir applies the mode only when it creates the directory
+  if ((fs.statSync(dir).mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
 }
 
 const PROFILE_NAME = /^[A-Za-z0-9._-]+$/;
+const UNSAFE_PUBLIC_ENV = /^(PATH|NODE_OPTIONS|NODE_PATH|DYLD_.*|LD_.*)$/;
+// CSI and OSC sequences, then any remaining control character except newline.
+const TERMINAL_CONTROL = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x09\x0b-\x1f\x7f]/g;
+const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 
 function profileFile(name) {
-  if (!name || !PROFILE_NAME.test(name)) {
+  if (!name || !PROFILE_NAME.test(name) || name === '.' || name === '..') {
     die('profile name: only letters, digits, dot, hyphen and underscore');
   }
   return path.join(STORE, `${name}.age`);
@@ -91,9 +104,36 @@ function splitProfileKeys(args) {
   return { name: first.slice(0, i), keys: [first.slice(i + 1), ...rest] };
 }
 
+// ---------- external tools ----------
+
+// age and age-plugin-se are looked up in fixed system directories, never in
+// PATH: under `npm run` the repository's node_modules/.bin comes first on PATH,
+// and a repository must not be able to substitute the binary that sees the
+// plaintext. SECENV_TOOL_DIRS (colon-separated) replaces the list, for tests.
+const TOOL_DIRS = (process.env.SECENV_TOOL_DIRS || '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin')
+  .split(':')
+  .filter(Boolean);
+const TOOL_ENV = { ...process.env, PATH: TOOL_DIRS.join(':') };
+
+function findTool(name) {
+  for (const dir of TOOL_DIRS) {
+    const file = path.join(dir, name);
+    try {
+      fs.accessSync(file, fs.constants.X_OK);
+      return file;
+    } catch {}
+  }
+  return null;
+}
+
+function tool(name) {
+  const file = findTool(name);
+  if (!file) die(`"${name}" not found in ${TOOL_DIRS.join(', ')}. Run install.sh or secenv setup.`);
+  return file;
+}
+
 function need(cmd) {
-  const r = spawnSync(cmd, ['--version'], { stdio: 'ignore' });
-  if (r.error) die(`"${cmd}" not found in PATH. Run install.sh or install it manually.`);
+  tool(cmd);
 }
 
 // ---------- dotenv parsing ----------
@@ -136,22 +176,23 @@ function readRecipient() {
 }
 
 function encryptTo(file, plaintext) {
-  const r = spawnSync('age', ['-r', readRecipient()], {
+  const r = spawnSync(tool('age'), ['-r', readRecipient()], {
     input: plaintext,
     stdio: ['pipe', 'pipe', 'inherit'],
+    env: TOOL_ENV, // age finds age-plugin-se through PATH as well
   });
   if (r.status !== 0) die('could not encrypt (age returned an error)');
   ensureDir(path.dirname(file));
   const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, r.stdout, { mode: 0o600 });
+  fs.writeFileSync(tmp, r.stdout, { mode: 0o600, flag: 'wx' });
   fs.renameSync(tmp, file); // atomic replace
 }
 
 function decryptFrom(file) {
-  need('age');
-  const r = spawnSync('age', ['-d', '-i', IDENTITY, file], {
+  const r = spawnSync(tool('age'), ['-d', '-i', IDENTITY, file], {
     stdio: ['ignore', 'pipe', 'inherit'],
     encoding: 'utf8',
+    env: TOOL_ENV,
   });
   if (r.status !== 0) die('could not decrypt (Touch ID cancelled or key does not match)');
   return r.stdout;
@@ -245,13 +286,12 @@ function cmdInit() {
   if (process.env.SECENV_INSECURE_SOFTWARE_KEY === '1') {
     // For tests / machines without a Secure Enclave only. The key sits on disk unprotected.
     console.error('WARNING: creating a software key without Secure Enclave protection.');
-    r = spawnSync('age-keygen', ['-o', IDENTITY], { stdio: ['ignore', 'inherit', 'inherit'] });
+    r = spawnSync(tool('age-keygen'), ['-o', IDENTITY], { stdio: ['ignore', 'inherit', 'inherit'], env: TOOL_ENV });
   } else {
-    need('age-plugin-se');
     r = spawnSync(
-      'age-plugin-se',
+      tool('age-plugin-se'),
       ['keygen', '--access-control=any-biometry', '-o', IDENTITY],
-      { stdio: ['ignore', 'inherit', 'inherit'] },
+      { stdio: ['ignore', 'inherit', 'inherit'], env: TOOL_ENV },
     );
   }
   if (r.status !== 0 || !fs.existsSync(IDENTITY)) die('could not create the key');
@@ -311,7 +351,7 @@ function existingProfileFile(name) {
 
 function trustedDirsFor(name) {
   return Object.entries(readTrusted())
-    .filter(([, p]) => p === name)
+    .filter(([, list]) => list.includes(name))
     .map(([dir]) => dir);
 }
 
@@ -327,7 +367,10 @@ async function cmdProfileRm(name, yes) {
   const trusted = readTrusted();
   const dirs = trustedDirsFor(name);
   if (dirs.length) {
-    dirs.forEach((dir) => delete trusted[dir]);
+    for (const dir of dirs) {
+      trusted[dir] = trusted[dir].filter((p) => p !== name);
+      if (!trusted[dir].length) delete trusted[dir];
+    }
     writeTrusted(trusted);
   }
   console.log(`Deleted profile "${name}".`);
@@ -362,17 +405,28 @@ function cmdProfileCp(from, to) {
 
 // Plaintext dump in .env format, e.g. to move secrets to a new Mac (the Secure
 // Enclave key cannot be moved). Same guard as get: terminal only by default.
-function cmdProfileExport(name, allowPipe) {
+function cmdProfileExport(name, { allowPipe, out }) {
   existingProfileFile(name);
-  if (!process.stdout.isTTY && !allowPipe) {
+  if (!out && !process.stdout.isTTY && !allowPipe) {
     die(
-      'refusing to write plaintext secrets into a pipe or file. ' +
-        'If you really need it (for example to move them to a new Mac), add --allow-pipe ' +
-        'and delete the file right after importing it.',
+      'refusing to write plaintext secrets into a pipe. ' +
+        'To write a file use --out <file> (created with mode 0600); ' +
+        'if you really need a pipe, add --allow-pipe.',
     );
   }
   const data = loadProfile(name, { mustExist: true });
-  process.stdout.write(formatDotenv(data));
+  const text = formatDotenv(data);
+  if (out) {
+    // A shell redirect would use the umask (usually 0644); open the file here.
+    try {
+      fs.writeFileSync(out, text, { mode: 0o600, flag: 'wx' });
+    } catch (e) {
+      die(e.code === 'EEXIST' ? `${out} already exists` : `could not write ${out}: ${e.message}`);
+    }
+    process.stderr.write(`Wrote ${Object.keys(data).length} secrets from "${name}" to ${out} in plaintext (mode 0600). Delete it after use.\n`);
+    return;
+  }
+  process.stdout.write(text);
   if (!process.stdout.isTTY) {
     process.stderr.write(`Exported ${Object.keys(data).length} secrets from "${name}" in plaintext. Delete the output after use.\n`);
   }
@@ -381,15 +435,15 @@ function cmdProfileExport(name, allowPipe) {
 // Approvals of project .secenv files (directory -> profile), see trustedProjectProfile.
 function cmdTrustLs(profile) {
   const entries = Object.entries(readTrusted())
-    .filter(([, p]) => !profile || p === profile)
+    .filter(([, list]) => !profile || list.includes(profile))
     .sort(([a], [b]) => a.localeCompare(b));
   if (!entries.length) {
-    process.stderr.write('No approved projects.\n');
+    process.stderr.write('No approved directories.\n');
     return;
   }
-  for (const [dir, p] of entries) {
-    const gone = !fs.existsSync(path.join(dir, '.secenv'));
-    console.log(`${dir}  ->  ${p}${gone ? '  (no .secenv, run: secenv profile trust prune)' : ''}`);
+  for (const [dir, list] of entries) {
+    const gone = !fs.existsSync(dir);
+    console.log(`${dir}  ->  ${list.join(', ')}${gone ? '  (directory gone, run: secenv profile trust prune)' : ''}`);
   }
 }
 
@@ -398,17 +452,17 @@ function cmdTrustRm(target) {
   let dir = path.resolve(target);
   if (!(dir in trusted) && fs.existsSync(dir)) dir = fs.realpathSync(dir);
   if (!(dir in trusted)) die(`no approval for ${dir}`);
-  const profile = trusted[dir];
+  const list = trusted[dir];
   delete trusted[dir];
   writeTrusted(trusted);
-  console.log(`Revoked: ${dir} can no longer select "${profile}" without asking.`);
+  console.log(`Revoked: ${dir} can no longer use ${list.map((p) => `"${p}"`).join(', ')} without asking.`);
 }
 
-// Drops approvals whose project or .secenv file is gone, so a different project
-// cloned into the same path later is asked again.
+// Drops approvals whose directory is gone, so a different project cloned into
+// the same path later is asked again.
 function cmdTrustPrune() {
   const trusted = readTrusted();
-  const gone = Object.keys(trusted).filter((dir) => !fs.existsSync(path.join(dir, '.secenv')));
+  const gone = Object.keys(trusted).filter((dir) => !fs.existsSync(dir));
   gone.forEach((dir) => delete trusted[dir]);
   if (gone.length) writeTrusted(trusted);
   console.log(gone.length ? `Removed ${gone.length} stale approval(s):\n  ${gone.join('\n  ')}` : 'Nothing to prune.');
@@ -419,17 +473,26 @@ const PROFILE_USAGE = `usage:
   secenv profile rm <name> [--yes]    delete a profile
   secenv profile mv <old> <new>       rename a profile
   secenv profile cp <src> <dst>       copy a profile
-  secenv profile export <name> [--allow-pipe]
-                                      print a profile in .env format (Touch ID)
-  secenv profile trust ls [<profile>] list projects approved to use a profile via .secenv
-  secenv profile trust rm <dir>       revoke a project's approval
-  secenv profile trust prune          remove approvals of deleted projects`;
+  secenv profile export <name> [--out <file>] [--allow-pipe]
+                                      print a profile in .env format (Touch ID);
+                                      --out writes a 0600 file instead
+  secenv profile trust ls [<profile>] list directories approved to use a profile
+  secenv profile trust rm <dir>       revoke a directory's approvals
+  secenv profile trust prune          remove approvals of deleted directories`;
 
 async function cmdProfile(args) {
   const [action, ...rest] = args;
   const yes = rest.includes('--yes');
   const allowPipe = rest.includes('--allow-pipe');
-  const pos = rest.filter((a) => a !== '--yes' && a !== '--allow-pipe');
+  let out;
+  const pos = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === '--yes' || rest[i] === '--allow-pipe') continue;
+    if (rest[i] === '--out') {
+      out = rest[++i];
+      if (!out) die('--out requires a file');
+    } else pos.push(rest[i]);
+  }
   const needArgs = (n) => {
     if (pos.length !== n) die(PROFILE_USAGE);
   };
@@ -449,7 +512,7 @@ async function cmdProfile(args) {
       return cmdProfileCp(pos[0], pos[1]);
     case 'export':
       needArgs(1);
-      return cmdProfileExport(pos[0], allowPipe);
+      return cmdProfileExport(pos[0], { allowPipe, out });
     case 'trust': {
       const [sub, ...targs] = pos;
       if (sub === 'ls' && targs.length <= 1) return cmdTrustLs(targs[0]);
@@ -503,12 +566,22 @@ function cmdRm(name, keys) {
 // The profile in ./.secenv decides which secrets the launched code receives, so
 // a cloned repository must not make that choice silently. The "directory ->
 // profile" binding is remembered after explicit confirmation.
+// trusted.json: { "<realpath of directory>": ["profile", ...] }. Older files
+// stored a single string per directory; both shapes are read.
 function readTrusted() {
+  let raw;
   try {
-    return JSON.parse(fs.readFileSync(TRUSTED, 'utf8'));
+    raw = JSON.parse(fs.readFileSync(TRUSTED, 'utf8'));
   } catch {
     return {};
   }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [dir, v] of Object.entries(raw)) {
+    const list = (Array.isArray(v) ? v : [v]).filter((x) => typeof x === 'string' && PROFILE_NAME.test(x));
+    if (list.length) out[dir] = list;
+  }
+  return out;
 }
 
 function writeTrusted(trusted) {
@@ -516,31 +589,62 @@ function writeTrusted(trusted) {
   fs.writeFileSync(TRUSTED, JSON.stringify(trusted, null, 2), { mode: 0o600 });
 }
 
+// Asks on the controlling terminal. When stdin is a pipe (data for the child,
+// `npm run` with redirected input) the question goes to /dev/tty instead, so an
+// approval can never be answered by piped data. Returns null without a terminal.
 async function confirm(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  let input = process.stdin;
+  let fd = null;
+  if (!input.isTTY) {
+    try {
+      fd = fs.openSync('/dev/tty', 'r+');
+      input = new (await import('node:tty')).ReadStream(fd);
+    } catch {
+      return null;
+    }
+  }
+  const rl = readline.createInterface({ input, output: process.stderr });
   const answer = await new Promise((resolve) => rl.question(`${question} [y/N] `, resolve));
   rl.close();
+  if (fd !== null) {
+    input.destroy();
+  }
   return /^y(es)?$/i.test(answer.trim());
 }
 
-async function trustedProjectProfile() {
+function projectProfile() {
   const file = path.resolve('.secenv');
   if (!fs.existsSync(file)) return undefined;
   const profile = fs.readFileSync(file, 'utf8').trim();
   // Validate before the name reaches any prompt or message: the file comes from
   // the repository, so it must not be able to inject text into the question.
   if (!PROFILE_NAME.test(profile)) die(`invalid profile name in ${file}`);
-  const dir = fs.realpathSync(path.dirname(file));
-  const trusted = readTrusted();
-  if (trusted[dir] === profile) return profile;
-
-  if (!process.stdin.isTTY) {
-    die(`${dir}/.secenv selects profile "${profile}", but it is not confirmed. Run secenv run in a terminal or pass the profile as an argument.`);
-  }
-  if (!(await confirm(`Project ${dir} requests profile "${profile}". Allow?`))) die('cancelled');
-  trusted[dir] = profile;
-  writeTrusted(trusted);
   return profile;
+}
+
+// Every `run` needs an approval of (directory, profile), whatever named the
+// profile: a repository's package.json script can pass the profile as an
+// argument just as easily as through .secenv, and the Touch ID dialog shows
+// neither the profile nor the command.
+async function approveRun(profile, source, cmd) {
+  const dir = fs.realpathSync(process.cwd());
+  const trusted = readTrusted();
+  if (trusted[dir]?.includes(profile)) return;
+
+  const question =
+    `secenv: first use of profile "${profile}" (${source}) in ${dir}\n` +
+    `  command: ${cmd.join(' ')}\n` +
+    `Allow this directory to use "${profile}" from now on?`;
+  const ok = await confirm(question);
+  if (ok === null) {
+    die(
+      `profile "${profile}" (${source}) is not approved for ${dir} and there is no terminal to ask. ` +
+        'Run it once interactively.',
+    );
+  }
+  if (!ok) die('cancelled');
+  trusted[dir] = [...(trusted[dir] ?? []), profile];
+  writeTrusted(trusted);
 }
 
 async function cmdRun(args) {
@@ -567,12 +671,28 @@ async function cmdRun(args) {
     } else if (!profile) profile = head[i];
     else die(`unexpected argument: ${head[i]}`);
   }
-  if (!profile) profile = process.env.SECENV_PROFILE;
-  if (!profile) profile = await trustedProjectProfile();
+  let source = 'argument';
+  if (!profile && process.env.SECENV_PROFILE) {
+    profile = process.env.SECENV_PROFILE;
+    source = 'SECENV_PROFILE';
+  }
+  if (!profile) {
+    profile = projectProfile();
+    source = '.secenv';
+  }
   if (!profile) die('no profile specified (argument, SECENV_PROFILE or .secenv file)');
+  profileFile(profile); // validate the name before it is shown anywhere
+  await approveRun(profile, source, cmd);
+  // The Touch ID dialog carries no context; this line is what the user can check.
+  process.stderr.write(`secenv: ${profile}${only ? '/' + only.join(',') : ''} (${source}) -> ${cmd.join(' ')}\n`);
 
   if (envFile && !fs.existsSync(envFile)) die(`--public-env: file not found: ${envFile}`);
   const plain = envFile ? parseDotenv(fs.readFileSync(envFile, 'utf8')) : {};
+  // A public env file may come from the repository; it must not decide which
+  // binary runs or what gets loaded into it.
+  const dropped = Object.keys(plain).filter((k) => UNSAFE_PUBLIC_ENV.test(k));
+  for (const k of dropped) delete plain[k];
+  if (dropped.length) process.stderr.write(`secenv: ignoring ${dropped.join(', ')} from ${envFile}\n`);
   let secrets = loadProfile(profile, { mustExist: true });
   if (only) {
     const missing = only.filter((k) => !(k in secrets));
@@ -605,11 +725,11 @@ function cmdCompletion(shell) {
 }
 
 function has(cmd) {
-  return !spawnSync(cmd, ['--version'], { stdio: 'ignore' }).error;
+  return findTool(cmd) !== null;
 }
 
 function brewPrefix() {
-  const r = spawnSync('brew', ['--prefix'], { encoding: 'utf8' });
+  const r = spawnSync(findTool('brew') ?? 'brew', ['--prefix'], { encoding: 'utf8' });
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
@@ -627,7 +747,7 @@ async function cmdSetup() {
     if (!brew) die(`missing: ${missing.join(', ')}. Install Homebrew (https://brew.sh), then run: ${install}`);
     if (!process.stdin.isTTY) die(`missing: ${missing.join(', ')}. Run: ${install}`);
     if (!(await confirm(`Missing ${missing.join(', ')}. Run "${install}" now?`))) die(`cancelled. Run: ${install}`);
-    const r = spawnSync('brew', ['install', ...missing], { stdio: 'inherit' });
+    const r = spawnSync(findTool('brew') ?? 'brew', ['install', ...missing], { stdio: 'inherit' });
     const still = missing.filter((c) => !has(c));
     if (r.status !== 0 || still.length) die(`"${install}" failed; still missing: ${still.join(', ') || missing.join(', ')}`);
   }
@@ -653,15 +773,136 @@ async function cmdSetup() {
   }
 }
 
+// ---------- version and update ----------
+
+function readPackage() {
+  try {
+    return JSON.parse(fs.readFileSync(PACKAGE_FILE, 'utf8'));
+  } catch {
+    return null; // install.sh copies only this script
+  }
+}
+
+function cmdVersion() {
+  console.log(readPackage()?.version ?? 'unknown (installed with install.sh)');
+}
+
+function newer(a, b) {
+  const pa = a.split(/[.-]/).map(Number);
+  const pb = b.split(/[.-]/).map(Number);
+  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+  return false;
+}
+
+function refreshBrewCompletion() {
+  const brew = brewPrefix();
+  const target = brew && path.join(brew, 'share', 'zsh', 'site-functions', '_secenv');
+  if (target && fs.existsSync(target) && fs.existsSync(COMPLETION_FILE)) {
+    try {
+      fs.copyFileSync(COMPLETION_FILE, target);
+      console.log(`✓ zsh completion refreshed: ${target}`);
+    } catch {}
+  }
+}
+
+// Sections of CHANGELOG.md newer than `from`, up to and including `to`.
+export function changelogBetween(text, from, to) {
+  const out = [];
+  for (const part of text.split(/^(?=## \[)/m)) {
+    const v = part.match(/^## \[(\d+\.\d+\.\d+)\]/)?.[1];
+    // Drop trailing link reference lines such as "[0.5.0]: https://...".
+    if (v && newer(v, from) && !newer(v, to)) out.push(part.replace(/^\[[^\]]+\]: .*$/gm, '').trimEnd());
+  }
+  return out.join('\n\n');
+}
+
+// The installed package carries the old changelog, so read the new one from
+// the release tag. Best effort: the compare link is printed either way.
+async function releaseNotes(repo, from, to) {
+  try {
+    const base = process.env.SECENV_CHANGELOG_BASE || `https://raw.githubusercontent.com/${repo}`;
+    const res = await fetch(`${base}/v${to}/CHANGELOG.md`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return '';
+    return changelogBetween(await res.text(), from, to);
+  } catch {
+    return '';
+  }
+}
+
+// Updates a global npm install to an exact, explicitly confirmed version: this
+// tool sees every secret, so it never updates itself silently.
+async function cmdUpdate(args) {
+  const check = args.includes('--check');
+  const yes = args.includes('--yes');
+  const pkg = readPackage();
+  if (!pkg) {
+    die('installed with install.sh: update with "git pull && ./install.sh" in your secenv checkout.');
+  }
+
+  let latest;
+  try {
+    const url = `${REGISTRY}/${pkg.name.replace('/', '%2f')}/latest`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    latest = (await res.json()).version;
+    if (typeof latest !== 'string' || !SEMVER.test(latest)) throw new Error(`unexpected version "${latest}"`);
+  } catch (e) {
+    die(`could not check the latest version: ${e.message}`);
+  }
+
+  if (!newer(latest, pkg.version)) {
+    console.log(`secenv ${pkg.version} is up to date.`);
+    return;
+  }
+  console.log(`secenv ${pkg.version} -> ${latest}`);
+  const repo = pkg.repository?.url?.match(/github\.com\/([^/]+\/[^/.]+)/)?.[1];
+  if (repo) {
+    const notes = await releaseNotes(repo, pkg.version, latest);
+    // Remote text: drop escape sequences and control characters, keep newlines.
+    if (notes) console.log(`\n${notes.replace(TERMINAL_CONTROL, '')}\n`);
+    console.log(`Changes: https://github.com/${repo}/compare/v${pkg.version}...v${latest}`);
+  }
+  if (check) return;
+
+  const r = spawnSync('npm', ['root', '-g'], { encoding: 'utf8' });
+  const globalRoot = r.status === 0 ? fs.realpathSync(r.stdout.trim()) : null;
+  const self = fs.realpathSync(fileURLToPath(import.meta.url));
+  if (!globalRoot || !self.startsWith(globalRoot + path.sep)) {
+    die(
+      `this copy is not a global npm install (${self}).\n` +
+        `For npx or a project dependency, change the pinned version to ${latest} where you use it.`,
+    );
+  }
+
+  if (!yes) {
+    if (!process.stdin.isTTY) die('refusing to update without a terminal; add --yes');
+    if (!(await confirm(`Install ${pkg.name}@${latest}?`))) die('cancelled');
+  }
+  const install = spawnSync('npm', ['install', '-g', '--ignore-scripts', `${pkg.name}@${latest}`], { stdio: 'inherit' });
+  if (install.status !== 0) die('npm install failed');
+  refreshBrewCompletion();
+  console.log(`✓ secenv ${latest} installed`);
+}
+
 // ---------- main ----------
 
 const isMain =
   process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
 if (isMain) {
   const [cmd, ...rest] = process.argv.slice(2);
+  // Tighten an existing data directory that was created with a wider mode.
+  for (const dir of [HOME, STORE]) if (fs.existsSync(dir)) ensureDir(dir);
   switch (cmd) {
     case 'init':
       cmdInit();
+      break;
+    case '-v':
+    case '--version':
+    case 'version':
+      cmdVersion();
+      break;
+    case 'update':
+      await cmdUpdate(rest);
       break;
     case 'setup':
       await cmdSetup();

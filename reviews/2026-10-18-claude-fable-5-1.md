@@ -1,46 +1,69 @@
-# secenv review
+# secenv security audit
 
-- **Model:** Claude Fable 5.1 (`claude-fable-5-1`)
+- **Model:** Claude Fable 5.1 (`claude-fable-5-1`), with one independent reviewer agent (same model family) that received the code but none of the auditor's conclusions
 - **Date:** 2026-10-18
-- **State:** after the fixes made in the same session. Reviewed: `src/secenv.mjs`, `src/completions/_secenv`, `install.sh`, `uninstall.sh`, `README.md` in the project folder.
+- **State:** after the fixes made in the same session, i.e. the 0.5.0 working tree on top of commit `bf9c1a4`. Reviewed: `src/secenv.mjs`, `src/completions/_secenv`, `install.sh`, `uninstall.sh`, `package.json`, `README.md`, `CHANGELOG.md`.
+- **Scope and method:** single-pass source audit against the trust boundaries below; every candidate was reproduced in a sandbox (`SECENV_HOME` in a scratch directory, `SECENV_TOOL_DIRS` pointing at a fake `age` that copies instead of encrypting, fake `npm`/`brew`, loopback HTTP servers, `expect` for the interactive prompts). No real key, no real secrets, no network, no Homebrew. This is not the full multi-agent audit workflow: one auditor, one independent reviewer, findings reconciled by hand, each fix re-tested with the reproduction that found the problem. Six findings were confirmed and fixed; what follows describes the state after the fixes. The findings themselves are summarised under "Security" in `CHANGELOG.md` for 0.5.0.
 
-## How it was checked
+## Trust boundaries considered
 
-- Full read of every file.
-- Command runs with a fake `age` (a shim that copies data without encrypting): `set`, `import`, `list`, `get`, `rm`, `run`, error handling.
-- Interactive paths through `expect` with a pseudo-terminal: hidden input of `set`, `get` output to a terminal, `.secenv` confirmation (answers `y` and `n`, repeat run without a prompt).
-- Running the extensionless copy on Node 20.18, 20.19, 22.16 and 24.16 (binaries from `~/.nvm`); the version gate in `install.sh` on Node 20.18.
-- A search for Cyrillic in all scripts.
+| # | Lower-trust principal | What secenv promises |
+| --- | --- | --- |
+| B1 | A cloned repository (its `package.json` scripts, `.secenv`, `.env.public`, `node_modules`) | It cannot pick which secrets it receives without the user's explicit, informed approval; `run profile/KEY` limits it to the listed keys |
+| B2 | Other local processes and users on the same Mac | Nothing in plaintext on disk; files `0600`/`0700`; secrets not in argv |
+| B3 | The network: npm registry, raw.githubusercontent.com, Homebrew | `update` never changes the tool silently |
+| B4 | Arguments, env vars, file names | No shell, no path traversal, no injection |
 
-**Not checked:** real decryption through the Secure Enclave and Touch ID (the user verified it by hand earlier: `set → run` worked with a real key), `uninstall.sh` in its deleting mode (it would remove the working installation), Tab completion in a live terminal.
+## Checked and found sound
 
-## What works
+### B1: a repository the user runs
 
-- The full command set: `init`, `set`, `import`, `list`, `get`, `rm`, `run`.
-- `get` prints the value only to a terminal; into a pipe or `$(...)` it refuses with a hint, and `--allow-pipe` lifts the refusal. The check runs before decryption, so a refusal does not trigger Touch ID.
-- `.secenv` confirmation: the question is asked once, the answer is stored in `trusted.json`, the next run goes through without a prompt, `n` cancels, and without a terminal the run is refused. The name from the file is validated before any message, so a multi-line or invalid file gives `invalid profile name in …/.secenv`.
-- `run` returns the child's exit code; if the child dies from a signal, it returns `128 + signal number` (SIGTERM → 143).
-- `--public-env` with no file or a missing file ends with an error.
-- Running the script from a path containing a space works.
-- Piped input: a single key gets the whole input (multi-line is fine), several keys get one line each, and a shortage of lines gives a clear error.
-- File permissions: directory `0700`; `identity.txt`, `recipient.txt` and profiles `0600`.
-- Atomic profile writes through a temporary file and `rename`.
-- `install.sh` requires Node 22+ and stops on older versions with a clear error. The script also runs on Node 20.19+, but the threshold of 22 was chosen to keep the rule simple.
-- No Cyrillic left in any script or comment.
+- **Approval is per (directory, profile), whatever names the profile.** `secenv run <profile>`, `SECENV_PROFILE` and `.secenv` all go through `approveRun`, which asks on the terminal with the profile, its source and the full command, and stores the answer in `trusted.json` as `realpath(dir) → [profiles]`. Confirmed: in an unapproved directory an `npm start` script that says `secenv run app -- …` is refused without a terminal and prompts with one; after `y` the directory is stored; a second profile in the same directory prompts again; the legacy string format of `trusted.json` is still read.
+- **The prompt goes to `/dev/tty`.** When stdin is a pipe feeding the child, the question is still asked on the terminal and the piped data still reaches the child (confirmed). Without any terminal the run is refused, and nothing is written to `trusted.json`.
+- **A context line precedes every decryption:** `secenv: <profile>[/keys] (<source>) -> <command>` on stderr. The Touch ID dialog itself (owned by `age-plugin-se`) carries no context, so this line is what the user can check while the dialog is up.
+- **`age`, `age-plugin-se` and `age-keygen` are never resolved from `PATH`.** They are looked up in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin` (or `SECENV_TOOL_DIRS`), and `age` is spawned with that `PATH` so it finds the plugin the same way. Confirmed: an `npm start` in a repository shipping `node_modules/.bin/age` (first on npm's `PATH`) decrypted through the system binary; the repository's copy was never executed.
+- **A `--public-env` file cannot redirect execution.** `PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*` and `LD_*` are dropped with a warning naming them; other keys (`PORT`) pass. Confirmed: with a repository `.env.public` that put `<repo>/localbin` first, `aws` no longer resolves to the repository's binary.
+- **`run profile/KEY` passes only the listed keys** to the child (confirmed), and with the fixed tool path nothing else sees the rest.
+- **`.secenv` content is validated** against the profile-name pattern before it reaches any prompt or message; a multi-line or invalid file is rejected.
 
-## What remains (non-blocking)
+### B2: other local processes and users
 
-- `decryptFrom` calls `need('age')` on every decryption (an extra `spawnSync age --version`), while `encryptTo` does not check at all. One check at the start of the commands that use `age` would be enough.
-- Encrypting to an `age1se1…` recipient also needs `age-plugin-se` on PATH, but `need('age-plugin-se')` exists only in `init`. Without the plugin the user sees a raw `age` error followed by "could not encrypt".
-- `let pipedLines` is declared after the function that uses it. It works, but reads badly: move it next to `pipedInput`.
-- In hidden input, arrow keys add escape sequences to the value. That does not matter for pasting from the clipboard, but it does for manual editing.
-- With `stdio: 'inherit'`, `Ctrl-C` reaches the child twice: from the terminal and from secenv's forwarding handler. Harmless for most programs.
-- Completion does not offer key names for `get`/`rm` (that would need Touch ID, so this is deliberate) and does not know the `profile/KEY` form.
+- Nothing plaintext on disk: profiles are `age` ciphertext, the temporary file during a write holds ciphertext and is created with `wx`, `identity.txt` is a reference to the Secure Enclave key.
+- Permissions: `~/.config/secenv` and `profiles/` `0700`, profile files, `identity.txt`, `recipient.txt`, `trusted.json` `0600`. A pre-existing data directory with a wider mode is re-tightened on every start (confirmed: `755` → `700`, including `profiles/`).
+- `profile export --out <file>` creates the file itself with mode `0600` and refuses to overwrite (confirmed: `600`, second call fails with "already exists"). The README no longer recommends a shell redirect. Export to a pipe still requires `--allow-pipe`; export to a terminal prints a plaintext warning.
+- Secrets never appear in argv or in error messages; `set` uses hidden input, so nothing lands in shell history; `get` refuses a non-TTY stdout without `--allow-pipe`, and both checks run before decryption.
+- Secrets in the launched process's environment are visible to that process and its children, and to `ps -E` for the same user. This is the design and is documented.
 
-## README
+### B3: network and supply chain
 
-Checked against the code: requirements, profile selection order, variable precedence, file list, `get` behaviour and the pipe refusal, exit codes, Troubleshooting, and the description of `uninstall.sh` all match the implementation. The clone URL in the Install section now points at the `origin` remote.
+- `update` accepts only a semver version string from the registry (confirmed: `"9.9.9 --ignore-scripts=false"` is rejected), shows the version change and the release notes with escape sequences and control characters stripped (confirmed with a changelog containing CSI and OSC sequences), prints a GitHub compare link, asks for confirmation (or `--yes`), installs that exact version with `npm install -g --ignore-scripts`, and refuses unless `realpath(self)` is under `realpath(npm root -g)`.
+- `setup` runs `brew install` only after a confirmation that names the packages, and verifies afterwards that the tools are actually present.
+- The trust root remains the npm account (2FA) and Homebrew. See "Open items".
 
-## Verdict
+### B4: arguments and inputs
 
-The tool does what it claims, and the main scenario (`set` → `run` under Touch ID) is confirmed on real hardware. There are no blocking problems. Before sharing with colleagues, reinstall the local copy with `./install.sh`: at review time `~/.local/bin` held the version from before the fixes.
+- No shell anywhere; every spawn uses an argv array. Profile names, keys, versions, directory names and file paths cannot inject commands.
+- `splitProfileKeys`, `PROFILE_NAME` (now also rejecting `.` and `..`), `checkKey` and `path.join(STORE, name + '.age')`: no traversal (`set ..`, `set ./Y`, `get /K`, `set a/b/K` are rejected).
+- `SECENV_HOME` is resolved to an absolute path; `trusted.json` that is not a plain object of string lists is treated as empty (confirmed: `null` → "No approved directories").
+- `install.sh` and `uninstall.sh`: `set -euo pipefail`, quoted paths; `uninstall.sh` now refuses to remove a data directory that has neither `identity.txt` nor `profiles/`, and still asks before deleting.
+
+## Open items
+
+### Needs validation (outside the source)
+
+- **Biometry policy.** The key is created with `--access-control=any-biometry`, stricter than the plugin default (`any-biometry-or-passcode`): the login password alone cannot decrypt. It accepts fingerprints enrolled later, which requires the login password and physical access; `current-biometry` would close that but stops working whenever fingerprints change. Whether macOS falls back to the password after repeated failed Touch ID attempts under this policy was not tested on hardware.
+- **Touch ID dialog text.** The dialog shows only `age-plugin-se`; whether the calling process or any context can be surfaced in it was not checked. The stderr context line is the mitigation.
+
+### Design limits (documented, not fixable in secenv)
+
+- The directory approval and the context line make a repository's request visible; they do not sandbox the launched code. A command the user approves receives the profile (or the listed keys) and can do anything with it. "Only run commands you trust" remains the rule, and per-project provider keys with spending limits remain the blast-radius control.
+- Approving a directory a script can `cd` into (home, `/tmp`) weakens the approval; the README says so.
+
+### Process
+
+- The npm package is unsigned and has no provenance attestation; `npm publish --provenance` from CI would let users verify that a release was built from the tagged commit. Until then, the README's advice to pin an exact version is the control.
+- The tagged source and the published tarball should keep matching; the review verified this for 0.2.0 by diff.
+
+## Coverage statement
+
+One source pass plus one independent review; sandbox reproduction only, no real Secure Enclave, no network. Not covered: the internals of `age` and `age-plugin-se`, macOS biometric fallback behaviour, the npm registry's own integrity guarantees, and Tab completion in a live terminal.
