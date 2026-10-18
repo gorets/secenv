@@ -50,6 +50,7 @@ _secenv() {
       elif [[ $words[CURRENT-1] == --public-env ]]; then
         _files
       else
+        # Profile names; the <profile>/KEY form is typed by hand (keys need Touch ID).
         _alternative \
           'profiles:profile:_secenv_profiles' \
           'options:option:(--public-env --)'

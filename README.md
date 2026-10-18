@@ -14,8 +14,9 @@ is synced or shared.
 
 - Mac with Apple Silicon and Touch ID (the Secure Enclave is required)
 - [Homebrew](https://brew.sh)
-- Node.js 22+ (the CLI is installed as an extensionless ES module; Node 20.19
-  also works, but `install.sh` requires 22 to keep the rule simple)
+- Node.js 22+ for `install.sh` (it copies the CLI as an extensionless ES module;
+  Node 20.19 also works, but the script requires 22 to keep the rule simple), or
+  Node.js 18+ when installing from npm
 
 ## What is the Secure Enclave
 
@@ -59,6 +60,21 @@ on your `PATH`, it tells you what to add to `~/.zshrc`.
 If installing `age-plugin-se` through Homebrew fails, install it following the
 [plugin's README](https://github.com/remko/age-plugin-se) and run `./install.sh`
 again. It is safe to re-run.
+
+### Install via npm (alternative)
+
+```bash
+brew install age age-plugin-se    # npm cannot install these
+npm i -g @vladimir.gorobets/secenv@0.2.0   # pin the version: this tool sees all your secrets
+secenv init                       # create the Secure Enclave key (once)
+```
+
+Or run without installing: `npx @vladimir.gorobets/secenv@0.2.0 run myapp -- node app.js`. `npx`
+checks the package on every call, so for daily use a global install (or a
+`devDependency` in your project) is faster. Pin a version either way, so that an
+update to the package cannot silently change the code that handles your
+secrets. Installing from npm works on Node 18+, but it does not set up the zsh
+completion; use `install.sh` for that.
 
 ### Shell completion (zsh)
 
@@ -144,12 +160,28 @@ In `package.json`:
 | `secenv set <profile> KEY [KEY...]` | Enter secret values (hidden input); updates existing keys |
 | `secenv import <profile> <file>` | Import a `.env` file, merging into the profile |
 | `secenv list <profile>` | Print secret names (never values) |
-| `secenv get <profile> KEY` | Print one secret value; also accepts `<profile>/KEY`. Terminal only (see below) |
+| `secenv get <profile> KEY` | Print one secret value. Terminal only (see below) |
 | `secenv rm <profile> KEY [KEY...]` | Remove secrets from a profile |
 | `secenv run [<profile>] [--public-env <file>] -- <command...>` | Run a command with secrets in its environment |
 
+`set`, `get` and `rm` also accept the `<profile>/KEY` form: `secenv set myapp/OPENAI_API_KEY`,
+`secenv get myapp/OPENAI_API_KEY`, `secenv rm myapp/OPENAI_API_KEY`.
+
 A profile is a named set of secrets (for example `wildix_dev`). Profile names
 may contain only letters, digits, `.`, `-` and `_`.
+
+### Passing only some secrets
+
+By default `run` passes the whole profile. List `<profile>/KEY` items instead to
+give the command only those secrets (all items must use the same profile):
+
+```bash
+secenv run myapp/OPENAI_API_KEY -- node script.js
+secenv run myapp/OPENAI_API_KEY myapp/STRIPE_SECRET_KEY -- node app.js
+```
+
+A key missing from the profile is an error, so a typo does not silently start
+the command without the secret.
 
 ### Choosing a profile
 

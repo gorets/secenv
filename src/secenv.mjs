@@ -32,6 +32,10 @@ Commands:
   secenv run [<profile>] [--public-env <file>] -- <command...>
                                       run a command with secrets in its environment
 
+set, get and rm also accept <profile>/KEY (secenv set myapp/OPENAI_API_KEY).
+run accepts one or more <profile>/KEY items to pass only those secrets:
+  secenv run myapp/OPENAI_API_KEY myapp/STRIPE_KEY -- node app.js
+
 The profile for run is optional: it is taken from the SECENV_PROFILE variable
 or from the .secenv file in the current directory (one line, the profile name).
 --public-env loads NON-secret variables (NODE_ENV, PORT, ...) from a file.
@@ -61,6 +65,15 @@ function profileFile(name) {
 
 function checkKey(key) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) die(`invalid variable name: ${key}`);
+}
+
+// Accepts both `<profile> KEY [KEY...]` and the `<profile>/KEY [KEY...]`
+// shorthand; profile names cannot contain a slash, so the split is unambiguous.
+function splitProfileKeys(args) {
+  const [first = '', ...rest] = args;
+  const i = first.lastIndexOf('/');
+  if (i === -1) return { name: first, keys: rest };
+  return { name: first.slice(0, i), keys: [first.slice(i + 1), ...rest] };
 }
 
 function need(cmd) {
@@ -267,15 +280,9 @@ function cmdGet(args) {
     if (a === '--allow-pipe') allowPipe = true;
     else pos.push(a);
   }
-  let [name, key] = pos;
-  if (pos.length === 1 && name.includes('/')) {
-    // <profile>/KEY shorthand; profile names cannot contain a slash
-    const i = name.lastIndexOf('/');
-    key = name.slice(i + 1);
-    name = name.slice(0, i);
-  } else if (pos.length !== 2) {
-    die('usage: secenv get <profile> KEY  (or <profile>/KEY)');
-  }
+  const { name, keys } = splitProfileKeys(pos);
+  if (keys.length !== 1) die('usage: secenv get <profile> KEY  (or <profile>/KEY)');
+  const [key] = keys;
   checkKey(key);
   if (!process.stdout.isTTY && !allowPipe) {
     die(
@@ -292,6 +299,7 @@ function cmdGet(args) {
 
 function cmdRm(name, keys) {
   if (!keys.length) die('specify secret names to remove');
+  keys.forEach(checkKey);
   const data = loadProfile(name, { mustExist: true });
   for (const k of keys) delete data[k];
   saveProfile(name, data);
@@ -338,10 +346,19 @@ async function cmdRun(args) {
 
   let profile;
   let envFile;
+  // `<profile>/KEY` items limit the child to the listed secrets only.
+  let only = null;
   for (let i = 0; i < head.length; i++) {
     if (head[i] === '--public-env') {
       envFile = head[++i];
       if (!envFile) die('--public-env requires a file');
+    } else if (head[i].includes('/')) {
+      const { name, keys } = splitProfileKeys([head[i]]);
+      if (profile && only === null) die(`unexpected argument: ${head[i]}`);
+      if (profile && profile !== name) die(`all <profile>/KEY items must use one profile: ${head[i]}`);
+      checkKey(keys[0]);
+      profile = name;
+      (only ??= []).push(keys[0]);
     } else if (!profile) profile = head[i];
     else die(`unexpected argument: ${head[i]}`);
   }
@@ -351,7 +368,12 @@ async function cmdRun(args) {
 
   if (envFile && !fs.existsSync(envFile)) die(`--public-env: file not found: ${envFile}`);
   const plain = envFile ? parseDotenv(fs.readFileSync(envFile, 'utf8')) : {};
-  const secrets = loadProfile(profile, { mustExist: true });
+  let secrets = loadProfile(profile, { mustExist: true });
+  if (only) {
+    const missing = only.filter((k) => !(k in secrets));
+    if (missing.length) die(`not found in profile "${profile}": ${missing.join(', ')}`);
+    secrets = Object.fromEntries(only.map((k) => [k, secrets[k]]));
+  }
   const env = { ...process.env, ...plain, ...secrets };
 
   const child = spawn(cmd[0], cmd.slice(1), { env, stdio: 'inherit' });
@@ -377,9 +399,11 @@ if (isMain) {
     case 'init':
       cmdInit();
       break;
-    case 'set':
-      await cmdSet(rest[0], rest.slice(1));
+    case 'set': {
+      const { name, keys } = splitProfileKeys(rest);
+      await cmdSet(name, keys);
       break;
+    }
     case 'import':
       cmdImport(rest[0], rest[1]);
       break;
@@ -389,9 +413,11 @@ if (isMain) {
     case 'get':
       cmdGet(rest);
       break;
-    case 'rm':
-      cmdRm(rest[0], rest.slice(1));
+    case 'rm': {
+      const { name, keys } = splitProfileKeys(rest);
+      cmdRm(name, keys);
       break;
+    }
     case 'run':
       await cmdRun(rest);
       break;

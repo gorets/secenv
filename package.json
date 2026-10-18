@@ -1,0 +1,41 @@
+{
+  "name": "@vladimir.gorobets/secenv",
+  "version": "0.2.0",
+  "description": "Personal secrets for local development, encrypted with age and a Mac Secure Enclave key (Touch ID)",
+  "type": "module",
+  "bin": {
+    "secenv": "src/secenv.mjs"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "keywords": [
+    "secrets",
+    "env",
+    "dotenv",
+    "age",
+    "secure-enclave",
+    "touch-id",
+    "macos"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gorets/secenv.git"
+  },
+  "homepage": "https://github.com/gorets/secenv#readme",
+  "bugs": {
+    "url": "https://github.com/gorets/secenv/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
