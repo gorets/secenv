@@ -1,0 +1,61 @@
+#compdef secenv
+# zsh completion for secenv: subcommands, profile names, and whatever the
+# wrapped command normally completes after `--`.
+
+_secenv_profiles() {
+  local dir=${SECENV_HOME:-$HOME/.config/secenv}/profiles
+  local -a profiles
+  profiles=(${${(f)"$(command ls $dir 2>/dev/null)"}%.age})
+  _describe -t profiles 'profile' profiles
+}
+
+_secenv() {
+  local -a cmds
+  cmds=(
+    'init:create the Secure Enclave key'
+    'set:enter secret values'
+    'import:import an existing .env file'
+    'list:list secret names'
+    'get:print one secret value (terminal only)'
+    'rm:remove secrets'
+    'run:run a command with secrets in its environment'
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'secenv command' cmds
+    return
+  fi
+
+  case $words[2] in
+    set|list|rm|get)
+      (( CURRENT == 3 )) && _secenv_profiles
+      ;;
+    import)
+      if (( CURRENT == 3 )); then
+        _secenv_profiles
+      elif (( CURRENT == 4 )); then
+        _files
+      fi
+      ;;
+    run)
+      local i sep=0
+      for (( i = 3; i < CURRENT; i++ )); do
+        [[ $words[i] == -- ]] && { sep=$i; break; }
+      done
+      if (( sep )); then
+        # Hand the rest of the line to the wrapped command's own completion.
+        words=("${(@)words[sep+1,-1]}")
+        (( CURRENT -= sep ))
+        _normal
+      elif [[ $words[CURRENT-1] == --public-env ]]; then
+        _files
+      else
+        _alternative \
+          'profiles:profile:_secenv_profiles' \
+          'options:option:(--public-env --)'
+      fi
+      ;;
+  esac
+}
+
+_secenv "$@"
