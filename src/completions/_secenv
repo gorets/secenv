@@ -58,8 +58,11 @@ _secenv() {
     import)
       if (( CURRENT == 3 )); then
         _secenv_profiles
-      elif (( CURRENT == 4 )); then
-        _files
+      elif [[ $words[CURRENT-1] == --only ]]; then
+        _message 'KEY,KEY'
+      else
+        _alternative 'files:file:_files' \
+          'options:option:(--all --only --rewrite --keep)'
       fi
       ;;
     run)
@@ -72,13 +75,13 @@ _secenv() {
         words=("${(@)words[sep+1,-1]}")
         (( CURRENT -= sep ))
         _normal
-      elif [[ $words[CURRENT-1] == --public-env ]]; then
+      elif [[ $words[CURRENT-1] == (--env|--public-env) ]]; then
         _files
       else
         # Profile names; the <profile>/KEY form is typed by hand (keys need Touch ID).
         _alternative \
           'profiles:profile:_secenv_profiles' \
-          'options:option:(--public-env --)'
+          'options:option:(--env --no-env --)'
       fi
       ;;
   esac

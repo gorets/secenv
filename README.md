@@ -40,7 +40,7 @@ What this means for secenv:
 - Malware that reads your files gets only encrypted data. To decrypt it needs
   you to touch the sensor.
 - If the Mac is lost, broken or wiped, the key is gone with the chip. Keep the
-  real secret values elsewhere (Keeper) and treat secenv as a working copy.
+  real secret values elsewhere (a password manager) and treat secenv as a working copy.
 
 What it does not protect against: someone who already controls your unlocked
 session and touches the sensor themselves, and the process you launch, which
@@ -64,7 +64,7 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-npm i -g @vladimir.gorobets/secenv@0.5.0   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.6.0   # pin the version: this tool sees all your secrets
 secenv setup
 ```
 
@@ -76,7 +76,7 @@ secenv setup
 - installs the zsh completion into Homebrew's `site-functions`, or tells you to
   add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.5.0 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.6.0 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
@@ -158,21 +158,21 @@ Then use it for real:
 
 ```bash
 # enter secrets (values are typed hidden)
-secenv set wildix_dev OPENAI_API_KEY STRIPE_SECRET_KEY
+secenv set myapp OPENAI_API_KEY STRIPE_SECRET_KEY
 
-# or import an existing .env, then delete it
-# (deleting does not wipe data on APFS/SSD, so treat keys that were ever in a
-# plaintext .env as exposed and rotate them)
-secenv import wildix_dev .env && rm .env
+# or import an existing .env: pick the keys, then let secenv replace their
+# values in the file with secenv:// references (the file becomes committable)
+secenv import myapp
 
 # run a command with the secrets in its environment (Touch ID prompt)
-secenv run wildix_dev -- node app.js
+secenv run myapp -- node app.js
 
-# also load non-secret variables from a file
-secenv run wildix_dev --public-env .env.public -- node app.js
+# .env in the project is read automatically; values like secenv://KEY are
+# replaced with secrets, everything else is passed as is (see below)
+secenv run -- node app.js
 
 # default profile for a project
-echo wildix_dev > .secenv
+echo myapp > .secenv
 secenv run -- npm start
 ```
 
@@ -184,6 +184,8 @@ In `package.json`:
 
 ## Commands
 
+Every command answers `--help` (`secenv run --help`, `secenv profile --help`).
+
 | Command | Description |
 | --- | --- |
 | `secenv setup` | Install `age` + `age-plugin-se`, create the key, set up completion (for npm installs; safe to re-run) |
@@ -192,7 +194,7 @@ In `package.json`:
 | `secenv update [--check] [--yes]` | Update a global npm install to the latest version (asks to confirm) |
 | `secenv --version` | Print the installed version |
 | `secenv set <profile> KEY [KEY...]` | Enter secret values (hidden input); updates existing keys |
-| `secenv import <profile> <file>` | Import a `.env` file, merging into the profile |
+| `secenv import <profile> [<file>] [--all \| --only K,K] [--rewrite \| --keep]` | Import keys from a `.env` file (default `./.env`): interactive picker, then optionally rewrite the values as `secenv://` references |
 | `secenv profile ls` | List profiles; `secenv profiles` is an alias |
 | `secenv profile rm <name> [--yes]` | Delete a profile with all its secrets (asks to confirm) |
 | `secenv profile mv <old> <new>` | Rename a profile |
@@ -202,12 +204,12 @@ In `package.json`:
 | `secenv list <profile>` | Print secret names (never values) |
 | `secenv get <profile> KEY` | Print one secret value. Terminal only (see below) |
 | `secenv rm <profile> KEY [KEY...]` | Remove secrets from a profile |
-| `secenv run [<profile>] [--public-env <file>] -- <command...>` | Run a command with secrets in its environment |
+| `secenv run [<profile>] [--env <file>\|--no-env] -- <command...>` | Run a command with secrets in its environment; reads `./.env` by default |
 
 `set`, `get` and `rm` also accept the `<profile>/KEY` form: `secenv set myapp/OPENAI_API_KEY`,
 `secenv get myapp/OPENAI_API_KEY`, `secenv rm myapp/OPENAI_API_KEY`.
 
-A profile is a named set of secrets (for example `wildix_dev`). Profile names
+A profile is a named set of secrets (for example `myapp`). Profile names
 may contain only letters, digits, `.`, `-` and `_`.
 
 ### Managing profiles
@@ -248,6 +250,56 @@ Delete the file on both machines as soon as it is imported. If your secrets also
 live in a password manager, re-entering them with `secenv set` on the new Mac
 avoids the plaintext file altogether.
 
+### Importing from `.env`
+
+`secenv import <profile>` reads `./.env` (or the file you name), shows a
+checklist of its variables (space toggles, `a` toggles all, enter confirms) and
+stores the selected ones in the profile. Lines that are already `secenv://`
+references are skipped. It then offers to rewrite the file: the imported values
+are replaced with `secenv://<profile>/KEY`, every other line stays as it is, so
+the file holds no secrets and can be committed.
+
+```bash
+secenv import myai                        # picker, then "replace values? [y/N]"
+secenv import myai --only OPENAI_API_KEY  # no picker
+secenv import myai --all --rewrite        # no questions (also the non-TTY default for the selection)
+secenv import myai --keep                 # import, leave the file alone
+```
+
+Rewriting the file does not wipe the old bytes from the disk, so keys that were
+ever stored in plaintext should still be rotated.
+
+### Referencing secrets from `.env`
+
+`run` reads `./.env` in the current directory (or the file given with `--env`),
+like dotenv. A value of the form `secenv://NAME` or `secenv://<profile>/NAME` is
+replaced with that secret from the profile; every other value is passed as it
+is. The file therefore contains no secrets and can be committed:
+
+```bash
+# .env, committed
+OPENAI_API_KEY=secenv://myai/OPENAI_API_KEY
+MISTRAL_API_KEY=secenv://myai/MISTRAL_API_KEY
+MODEL=gpt-4.1
+```
+
+```bash
+secenv run -- npm start          # profile myai comes from the references
+```
+
+- When the references name a profile, no other profile source is needed. All
+  references must use the same profile, and it must match the profile from the
+  argument, `SECENV_PROFILE` or `.secenv` if one of those is given too.
+- When a file contains references, the command receives only the referenced
+  secrets (under the names on the left-hand side), not the whole profile. A
+  reference to a missing secret is an error.
+- `PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*` and `LD_*` in the file are
+  ignored with a warning: the file may come from the repository, and it must not
+  decide which binary runs or what gets loaded into it.
+- `--no-env` skips the file. Drop `--env-file=.env` from your `node` scripts:
+  Node would fail on a file it cannot find, and the variables are already in the
+  environment.
+
 ### Passing only some secrets
 
 By default `run` passes the whole profile. List `<profile>/KEY` items instead to
@@ -265,7 +317,7 @@ the command without the secret.
 
 `secenv run` picks the profile in this order:
 
-1. the argument: `secenv run wildix_dev -- ...`
+1. the argument: `secenv run myapp -- ...`
 2. the `SECENV_PROFILE` environment variable
 3. the `.secenv` file in the current directory (one line, the profile name)
 
@@ -277,12 +329,11 @@ asks for approval (see "Directory approvals").
 When the same name appears in several places, the later one wins:
 
 1. your current shell environment
-2. `--public-env` file (non-secret variables such as `NODE_ENV` or `PORT`)
+2. the env file (`./.env` or `--env <file>`), references resolved
 3. the secret profile
 
-`PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*` and `LD_*` in a public env file are
-ignored with a warning: the file may come from the repository, and it must not
-decide which binary runs or what gets loaded into it.
+`PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*` and `LD_*` in the env file are
+ignored with a warning.
 
 ### Directory approvals
 
@@ -291,12 +342,12 @@ first time `secenv run` uses a profile in a directory, however the profile was
 named (argument, `SECENV_PROFILE` or `.secenv`), it asks on your terminal:
 
 ```
-secenv: first use of profile "wildix_dev" (argument) in /path/to/project
+secenv: first use of profile "myapp" (argument) in /path/to/project
   command: node app.js
-Allow this directory to use "wildix_dev" from now on? [y/N]
+Allow this directory to use "myapp" from now on? [y/N]
 ```
 
-This matters because a cloned repository can put `secenv run wildix_dev -- …`
+This matters because a cloned repository can put `secenv run myapp -- …`
 into its `package.json` just as easily as a profile name into `.secenv`, and the
 Touch ID dialog shows neither the profile nor the command. Read the two lines
 before answering: if you did not expect that profile or that command in that
@@ -415,7 +466,7 @@ its children can read the secrets from their environment (for example with `env`
 
 - **Losing the Mac means losing the key.** A Secure Enclave key cannot be
   backed up or restored, and encrypted profiles become unreadable without it.
-  Keep the real secret values in your primary store (Keeper) and treat secenv as
+  Keep the real secret values in your primary store (a password manager) and treat secenv as
   a working copy.
 - Touch ID is requested on every `secenv run` and `get` (and on `set`,
   `import`, `list` and `rm` for an existing profile).
@@ -447,9 +498,9 @@ its children can read the secrets from their environment (for example with `env`
 | `profile "…" (…) is not approved for … and there is no terminal to ask` | Run it once from a terminal and answer `y` (approvals are per directory) |
 | `invalid profile name in .../.secenv` | The file must contain one line with a profile name (letters, digits, `.`, `-`, `_`) |
 | `refusing to print a secret into a pipe or $(...)` | Use `secenv run <profile> -- sh -c '...'` so the child shell expands the variable, or add `--allow-pipe` if you accept the `ps` exposure |
-| `--public-env requires a file` | Pass the file: `--public-env .env.public` |
+| `--env requires a file` | Pass the file: `--env .env.public` |
 | `SyntaxError` / "To load an ES module" when running `secenv` | Node is older than 22 (20.19+ also works); upgrade Node |
-| Node reports `<file>: not found` for `--env-file` | The flag is called `--public-env`; Node intercepts `--env-file` itself |
+| Node reports `<file>: not found` for `--env-file` | The secenv flag is `--env`; Node intercepts `--env-file` itself. Inside your own `node` scripts, drop `--env-file=.env`: secenv already loaded it |
 | A command killed by a signal | `secenv run` exits with `128 + signal number` (for example 143 for SIGTERM), like a shell would |
 
 ## Uninstall

@@ -4,6 +4,26 @@ All notable changes to secenv. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-10-18
+
+### Added
+
+- `run` reads `./.env` (or `--env <file>`) like dotenv. Values of the form
+  `secenv://NAME` or `secenv://<profile>/NAME` are replaced with the secret, so
+  the file holds no secrets and can be committed. With references the command
+  receives only the referenced secrets; the profile can come from the
+  references alone. `--no-env` skips the file. `--public-env` remains as an
+  alias of `--env`.
+- `secenv <command> --help` and `secenv help <command>` print a description,
+  options and examples for every command; usage errors name what is missing
+  and show the one-line usage. `secenv run app -- tool --help` still passes
+  `--help` to the tool.
+- `import` shows an interactive checklist of the file's variables (`--all`,
+  `--only KEY,KEY` to skip it) and then offers to rewrite the imported values
+  in the file as `secenv://<profile>/KEY` references (`--rewrite`, `--keep`),
+  keeping comments and order. Lines that already hold references are skipped.
+  The file defaults to `./.env`.
+
 ## [0.5.0] - 2026-10-18
 
 ### Security
@@ -102,6 +122,7 @@ First published version.
 - `--public-env` for non-secret variables.
 - zsh completion, `install.sh` and `uninstall.sh`.
 
+[0.6.0]: https://github.com/gorets/secenv/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/gorets/secenv/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gorets/secenv/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gorets/secenv/compare/v0.2.0...v0.3.0
