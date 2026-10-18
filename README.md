@@ -65,11 +65,11 @@ again. It is safe to re-run.
 
 ```bash
 brew install age age-plugin-se    # npm cannot install these
-npm i -g @vladimir.gorobets/secenv@0.2.0   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.3.0   # pin the version: this tool sees all your secrets
 secenv init                       # create the Secure Enclave key (once)
 ```
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.2.0 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.3.0 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
@@ -159,6 +159,12 @@ In `package.json`:
 | `secenv init` | Create the Secure Enclave key (once; `install.sh` does this) |
 | `secenv set <profile> KEY [KEY...]` | Enter secret values (hidden input); updates existing keys |
 | `secenv import <profile> <file>` | Import a `.env` file, merging into the profile |
+| `secenv profile ls` | List profiles; `secenv profiles` is an alias |
+| `secenv profile rm <name> [--yes]` | Delete a profile with all its secrets (asks to confirm) |
+| `secenv profile mv <old> <new>` | Rename a profile |
+| `secenv profile cp <src> <dst>` | Copy a profile |
+| `secenv profile export <name>` | Print a profile in `.env` format. Terminal only (see below) |
+| `secenv profile trust ls\|rm\|prune` | View and revoke `.secenv` approvals of projects (see below) |
 | `secenv list <profile>` | Print secret names (never values) |
 | `secenv get <profile> KEY` | Print one secret value. Terminal only (see below) |
 | `secenv rm <profile> KEY [KEY...]` | Remove secrets from a profile |
@@ -169,6 +175,42 @@ In `package.json`:
 
 A profile is a named set of secrets (for example `wildix_dev`). Profile names
 may contain only letters, digits, `.`, `-` and `_`.
+
+### Managing profiles
+
+`ls`, `rm`, `mv` and `cp` work on the encrypted files directly, so none of them
+needs Touch ID:
+
+```bash
+secenv profile ls                       # myapp, myapp-staging, ...
+secenv profile cp myapp myapp-staging   # copy, then change a few keys with set
+secenv profile mv myapp-staging staging # rename
+secenv profile rm staging               # asks to confirm; --yes without a terminal
+```
+
+- `cp` and `mv` refuse to overwrite an existing profile.
+- `mv` lists the projects whose `.secenv` still names the old profile; update
+  those files yourself.
+- `rm` also drops the `.secenv` approvals for that profile, so a profile created
+  later under the same name has to be approved again.
+
+#### Moving to a new Mac
+
+The Secure Enclave key cannot be moved, so the only way to carry secrets over is
+through plaintext. `profile export` prints a profile in `.env` format (Touch ID).
+Like `get`, it writes only to a terminal; writing into a file or pipe needs an
+explicit `--allow-pipe`:
+
+```bash
+# old Mac
+secenv profile export myapp --allow-pipe > myapp.env
+# copy myapp.env over a channel you trust, then on the new Mac
+secenv import myapp myapp.env && rm myapp.env
+```
+
+Delete the file on both machines as soon as it is imported. If your secrets also
+live in a password manager, re-entering them with `secenv set` on the new Mac
+avoids the plaintext file altogether.
 
 ### Passing only some secrets
 
@@ -214,6 +256,21 @@ changes (for example after `git pull`), it asks again. Without a terminal (CI,
 pipes) such a run is refused; pass the profile as an argument instead. If you are
 asked in a repository you do not know, answer `n`.
 
+To view or revoke approvals (no Touch ID):
+
+```bash
+secenv profile trust ls            # every approved project and its profile
+secenv profile trust ls myapp      # only projects that use myapp
+secenv profile trust rm .          # revoke the current project (or pass a path)
+secenv profile trust prune         # drop approvals of deleted projects
+```
+
+Revoke an approval when you answered `y` too quickly, when the code in that
+folder is no longer something you trust (for example a different repository was
+cloned into the same path), or when the project is gone. The next `secenv run`
+there asks again. `profile rm` revokes the approvals of the deleted profile by
+itself.
+
 ### Piping values
 
 A single value can be piped, including multi-line values such as private keys:
@@ -252,7 +309,7 @@ manager, not secenv.
 ### Viewing secrets
 
 ```bash
-ls ~/.config/secenv/profiles       # profile names, no Touch ID
+secenv profile ls                  # profile names, no Touch ID
 secenv list myapp                  # secret names, never values (Touch ID)
 secenv get myapp OPENAI_API_KEY    # the value (Touch ID); same as myapp/OPENAI_API_KEY
 

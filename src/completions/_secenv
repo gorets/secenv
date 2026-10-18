@@ -15,6 +15,7 @@ _secenv() {
     'init:create the Secure Enclave key'
     'set:enter secret values'
     'import:import an existing .env file'
+    'profile:manage profiles (ls, rm, mv, cp, export, trust)'
     'list:list secret names'
     'get:print one secret value (terminal only)'
     'rm:remove secrets'
@@ -29,6 +30,20 @@ _secenv() {
   case $words[2] in
     set|list|rm|get)
       (( CURRENT == 3 )) && _secenv_profiles
+      ;;
+    profile|profiles)
+      if (( CURRENT == 3 )); then
+        _values 'action' 'ls[list profiles]' 'rm[delete a profile]' 'mv[rename a profile]' 'cp[copy a profile]' 'export[print a profile in .env format]' 'trust[manage .secenv approvals]'
+      elif (( CURRENT == 4 )) && [[ $words[3] == (rm|mv|cp|export) ]]; then
+        _secenv_profiles
+      elif (( CURRENT == 4 )) && [[ $words[3] == trust ]]; then
+        _values 'trust action' 'ls[list approved projects]' 'rm[revoke an approval]' 'prune[remove approvals of deleted projects]'
+      elif (( CURRENT == 5 )) && [[ $words[3] == trust ]]; then
+        case $words[4] in
+          ls) _secenv_profiles ;;
+          rm) _directories ;;
+        esac
+      fi
       ;;
     import)
       if (( CURRENT == 3 )); then

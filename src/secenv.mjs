@@ -26,11 +26,21 @@ Commands:
   secenv init                         create the Secure Enclave key (once)
   secenv set <profile> KEY [KEY...]   enter secret values (hidden input)
   secenv import <profile> <.env>      import an existing .env file
+  secenv profile ls                   list profiles
+  secenv profile rm <name> [--yes]    delete a profile (asks to confirm)
+  secenv profile mv <old> <new>       rename a profile
+  secenv profile cp <src> <dst>       copy a profile
+  secenv profile export <name>        print a profile in .env format (terminal only)
+  secenv profile trust ls|rm|prune    manage .secenv approvals of projects
   secenv list <profile>               print secret names (never values)
   secenv get <profile> KEY            print one secret value (terminal only)
   secenv rm <profile> KEY [KEY...]    remove secrets
   secenv run [<profile>] [--public-env <file>] -- <command...>
                                       run a command with secrets in its environment
+
+profile ls, rm, mv and cp work on files only: no Touch ID needed. profile export
+decrypts (Touch ID) and, like get, refuses to write into a pipe or file unless
+you add --allow-pipe.
 
 set, get and rm also accept <profile>/KEY (secenv set myapp/OPENAI_API_KEY).
 run accepts one or more <profile>/KEY items to pass only those secrets:
@@ -92,11 +102,8 @@ export function parseDotenv(text) {
     if (!m) continue;
     let [, key, val] = m;
     if (val.startsWith('"') && val.lastIndexOf('"') > 0) {
-      val = val
-        .slice(1, val.lastIndexOf('"'))
-        .replace(/\\n/g, '\n')
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, '\\');
+      const esc = { n: '\n', r: '\r', '"': '"', '\\': '\\' };
+      val = val.slice(1, val.lastIndexOf('"')).replace(/\\([nr"\\])/g, (_, c) => esc[c]);
     } else if (val.startsWith("'") && val.lastIndexOf("'") > 0) {
       val = val.slice(1, val.lastIndexOf("'"));
     } else {
@@ -105,6 +112,15 @@ export function parseDotenv(text) {
     out[key] = val;
   }
   return out;
+}
+
+export function formatDotenv(data) {
+  const quote = (v) =>
+    `"${v.replace(/[\\"\n\r]/g, (c) => ({ '\\': '\\\\', '"': '\\"', '\n': '\\n', '\r': '\\r' })[c])}"`;
+  return Object.keys(data)
+    .sort()
+    .map((k) => `${k}=${quote(String(data[k]))}\n`)
+    .join('');
 }
 
 // ---------- age helpers ----------
@@ -268,6 +284,179 @@ function cmdImport(name, file) {
   console.log(`Now delete the source file (rm ${file}) and rotate any keys that were in it.`);
 }
 
+// Reads file names only, so no decryption and no Touch ID.
+function cmdProfiles() {
+  let files = [];
+  try {
+    files = fs.readdirSync(STORE);
+  } catch {}
+  const names = files.filter((f) => f.endsWith('.age')).map((f) => f.slice(0, -4)).sort();
+  if (!names.length) {
+    process.stderr.write('No profiles yet. Create one: secenv set <profile> KEY\n');
+    return;
+  }
+  names.forEach((n) => console.log(n));
+}
+
+function existingProfileFile(name) {
+  const file = profileFile(name);
+  if (!fs.existsSync(file)) die(`profile "${name}" not found`);
+  return file;
+}
+
+function trustedDirsFor(name) {
+  return Object.entries(readTrusted())
+    .filter(([, p]) => p === name)
+    .map(([dir]) => dir);
+}
+
+async function cmdProfileRm(name, yes) {
+  const file = existingProfileFile(name);
+  if (!yes) {
+    if (!process.stdin.isTTY) die('refusing to delete without a terminal; add --yes');
+    if (!(await confirm(`Delete profile "${name}" and all its secrets? This cannot be undone.`))) die('cancelled');
+  }
+  fs.unlinkSync(file);
+  // Drop approvals for the deleted profile, so a profile recreated later under
+  // the same name is not silently trusted by old projects.
+  const trusted = readTrusted();
+  const dirs = trustedDirsFor(name);
+  if (dirs.length) {
+    dirs.forEach((dir) => delete trusted[dir]);
+    writeTrusted(trusted);
+  }
+  console.log(`Deleted profile "${name}".`);
+}
+
+function cmdProfileMv(from, to) {
+  const src = existingProfileFile(from);
+  const dst = profileFile(to);
+  if (fs.existsSync(dst)) die(`profile "${to}" already exists`);
+  fs.renameSync(src, dst);
+  console.log(`Renamed profile "${from}" to "${to}".`);
+  const dirs = trustedDirsFor(from);
+  if (dirs.length) {
+    console.log(`These projects select "${from}" in .secenv; update the file to "${to}":`);
+    dirs.forEach((dir) => console.log(`  ${dir}`));
+  }
+}
+
+function cmdProfileCp(from, to) {
+  const src = existingProfileFile(from);
+  const dst = profileFile(to);
+  // The copy stays encrypted to the same key, so no decryption is needed.
+  try {
+    fs.copyFileSync(src, dst, fs.constants.COPYFILE_EXCL);
+  } catch (e) {
+    if (e.code === 'EEXIST') die(`profile "${to}" already exists`);
+    throw e;
+  }
+  fs.chmodSync(dst, 0o600);
+  console.log(`Copied profile "${from}" to "${to}".`);
+}
+
+// Plaintext dump in .env format, e.g. to move secrets to a new Mac (the Secure
+// Enclave key cannot be moved). Same guard as get: terminal only by default.
+function cmdProfileExport(name, allowPipe) {
+  existingProfileFile(name);
+  if (!process.stdout.isTTY && !allowPipe) {
+    die(
+      'refusing to write plaintext secrets into a pipe or file. ' +
+        'If you really need it (for example to move them to a new Mac), add --allow-pipe ' +
+        'and delete the file right after importing it.',
+    );
+  }
+  const data = loadProfile(name, { mustExist: true });
+  process.stdout.write(formatDotenv(data));
+  if (!process.stdout.isTTY) {
+    process.stderr.write(`Exported ${Object.keys(data).length} secrets from "${name}" in plaintext. Delete the output after use.\n`);
+  }
+}
+
+// Approvals of project .secenv files (directory -> profile), see trustedProjectProfile.
+function cmdTrustLs(profile) {
+  const entries = Object.entries(readTrusted())
+    .filter(([, p]) => !profile || p === profile)
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (!entries.length) {
+    process.stderr.write('No approved projects.\n');
+    return;
+  }
+  for (const [dir, p] of entries) {
+    const gone = !fs.existsSync(path.join(dir, '.secenv'));
+    console.log(`${dir}  ->  ${p}${gone ? '  (no .secenv, run: secenv profile trust prune)' : ''}`);
+  }
+}
+
+function cmdTrustRm(target) {
+  const trusted = readTrusted();
+  let dir = path.resolve(target);
+  if (!(dir in trusted) && fs.existsSync(dir)) dir = fs.realpathSync(dir);
+  if (!(dir in trusted)) die(`no approval for ${dir}`);
+  const profile = trusted[dir];
+  delete trusted[dir];
+  writeTrusted(trusted);
+  console.log(`Revoked: ${dir} can no longer select "${profile}" without asking.`);
+}
+
+// Drops approvals whose project or .secenv file is gone, so a different project
+// cloned into the same path later is asked again.
+function cmdTrustPrune() {
+  const trusted = readTrusted();
+  const gone = Object.keys(trusted).filter((dir) => !fs.existsSync(path.join(dir, '.secenv')));
+  gone.forEach((dir) => delete trusted[dir]);
+  if (gone.length) writeTrusted(trusted);
+  console.log(gone.length ? `Removed ${gone.length} stale approval(s):\n  ${gone.join('\n  ')}` : 'Nothing to prune.');
+}
+
+const PROFILE_USAGE = `usage:
+  secenv profile ls                   list profiles
+  secenv profile rm <name> [--yes]    delete a profile
+  secenv profile mv <old> <new>       rename a profile
+  secenv profile cp <src> <dst>       copy a profile
+  secenv profile export <name> [--allow-pipe]
+                                      print a profile in .env format (Touch ID)
+  secenv profile trust ls [<profile>] list projects approved to use a profile via .secenv
+  secenv profile trust rm <dir>       revoke a project's approval
+  secenv profile trust prune          remove approvals of deleted projects`;
+
+async function cmdProfile(args) {
+  const [action, ...rest] = args;
+  const yes = rest.includes('--yes');
+  const allowPipe = rest.includes('--allow-pipe');
+  const pos = rest.filter((a) => a !== '--yes' && a !== '--allow-pipe');
+  const needArgs = (n) => {
+    if (pos.length !== n) die(PROFILE_USAGE);
+  };
+  switch (action) {
+    case 'ls':
+    case 'list':
+      needArgs(0);
+      return cmdProfiles();
+    case 'rm':
+      needArgs(1);
+      return cmdProfileRm(pos[0], yes);
+    case 'mv':
+      needArgs(2);
+      return cmdProfileMv(pos[0], pos[1]);
+    case 'cp':
+      needArgs(2);
+      return cmdProfileCp(pos[0], pos[1]);
+    case 'export':
+      needArgs(1);
+      return cmdProfileExport(pos[0], allowPipe);
+    case 'trust': {
+      const [sub, ...targs] = pos;
+      if (sub === 'ls' && targs.length <= 1) return cmdTrustLs(targs[0]);
+      if (sub === 'rm' && targs.length === 1) return cmdTrustRm(targs[0]);
+      if (sub === 'prune' && !targs.length) return cmdTrustPrune();
+      die(PROFILE_USAGE);
+    }
+    default:
+      die(PROFILE_USAGE);
+  }
+}
+
 function cmdList(name) {
   const data = loadProfile(name, { mustExist: true });
   Object.keys(data).sort().forEach((k) => console.log(k));
@@ -309,6 +498,26 @@ function cmdRm(name, keys) {
 // The profile in ./.secenv decides which secrets the launched code receives, so
 // a cloned repository must not make that choice silently. The "directory ->
 // profile" binding is remembered after explicit confirmation.
+function readTrusted() {
+  try {
+    return JSON.parse(fs.readFileSync(TRUSTED, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function writeTrusted(trusted) {
+  ensureDir(HOME);
+  fs.writeFileSync(TRUSTED, JSON.stringify(trusted, null, 2), { mode: 0o600 });
+}
+
+async function confirm(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  const answer = await new Promise((resolve) => rl.question(`${question} [y/N] `, resolve));
+  rl.close();
+  return /^y(es)?$/i.test(answer.trim());
+}
+
 async function trustedProjectProfile() {
   const file = path.resolve('.secenv');
   if (!fs.existsSync(file)) return undefined;
@@ -317,24 +526,15 @@ async function trustedProjectProfile() {
   // the repository, so it must not be able to inject text into the question.
   if (!PROFILE_NAME.test(profile)) die(`invalid profile name in ${file}`);
   const dir = fs.realpathSync(path.dirname(file));
-  let trusted = {};
-  try {
-    trusted = JSON.parse(fs.readFileSync(TRUSTED, 'utf8'));
-  } catch {}
+  const trusted = readTrusted();
   if (trusted[dir] === profile) return profile;
 
   if (!process.stdin.isTTY) {
     die(`${dir}/.secenv selects profile "${profile}", but it is not confirmed. Run secenv run in a terminal or pass the profile as an argument.`);
   }
-  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-  const answer = await new Promise((resolve) =>
-    rl.question(`Project ${dir} requests profile "${profile}". Allow? [y/N] `, resolve),
-  );
-  rl.close();
-  if (!/^y(es)?$/i.test(answer.trim())) die('cancelled');
+  if (!(await confirm(`Project ${dir} requests profile "${profile}". Allow?`))) die('cancelled');
   trusted[dir] = profile;
-  ensureDir(HOME);
-  fs.writeFileSync(TRUSTED, JSON.stringify(trusted, null, 2), { mode: 0o600 });
+  writeTrusted(trusted);
   return profile;
 }
 
@@ -407,7 +607,13 @@ if (isMain) {
     case 'import':
       cmdImport(rest[0], rest[1]);
       break;
+    // `profile <action>` is the canonical form; bare `profiles` means `profile ls`.
+    case 'profile':
+    case 'profiles':
+      await cmdProfile(cmd === 'profiles' && !rest.length ? ['ls'] : rest);
+      break;
     case 'list':
+      if (!rest[0]) die('specify a profile: secenv list <profile>  (all profiles: secenv profile ls)');
       cmdList(rest[0]);
       break;
     case 'get':
