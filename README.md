@@ -64,7 +64,7 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-npm i -g @vladimir.gorobets/secenv@0.6.2   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.7.0   # pin the version: this tool sees all your secrets
 secenv setup
 ```
 
@@ -76,7 +76,7 @@ secenv setup
 - installs the zsh completion into Homebrew's `site-functions`, or tells you to
   add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.6.2 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.7.0 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
@@ -201,7 +201,7 @@ Every command answers `--help` (`secenv run --help`, `secenv profile --help`).
 | `secenv profile cp <src> <dst>` | Copy a profile |
 | `secenv profile export <name> [--out <file>]` | Print a profile in `.env` format (terminal only), or write it to a `0600` file |
 | `secenv profile trust ls\|rm\|prune` | View and revoke directory approvals (see below) |
-| `secenv list [<profile>]` | Without a profile: list profiles. With one: print its secret names (never values). `ls` works everywhere `list` does, and `secenv profile <name>` does the same as `secenv list <name>` |
+| `secenv list [<profile>] [--older 90d]` | Without a profile: list profiles. With one: print its secret names with the dates they were added and last changed (never values); `--older` shows only secrets not changed for that many days. `ls` works everywhere `list` does, and `secenv profile <name>` does the same as `secenv list <name>` |
 | `secenv get <profile> KEY` | Print one secret value. Terminal only (see below) |
 | `secenv rm <profile> KEY [KEY...]` | Remove secrets from a profile |
 | `secenv cp <profile>/KEY <profile>[/KEY]` | Copy one secret to another profile, optionally under a new name (one Touch ID per profile) |
@@ -408,8 +408,10 @@ Everything lives in `~/.config/secenv/` (override with `SECENV_HOME`):
 
 The zsh completion is installed separately, outside this directory (see above).
 
-A profile file is a JSON object (`{"OPENAI_API_KEY": "..."}`) encrypted with
-`age`. The private key exists only inside the Secure Enclave and never leaves it,
+A profile file is a JSON object encrypted with `age`; each secret carries the
+dates it was added and last changed:
+`{"OPENAI_API_KEY": {"value": "...", "added": "2026-10-18T14:02:11Z", "updated": "2026-10-18T14:02:11Z"}}`.
+The dates are inside the ciphertext, like the key names. The private key exists only inside the Secure Enclave and never leaves it,
 so a copy of this directory on another machine cannot be decrypted.
 
 Do not send these files to anyone: profiles can be decrypted only by the key in
@@ -420,7 +422,8 @@ manager, not secenv.
 
 ```bash
 secenv profile ls                  # profile names, no Touch ID
-secenv list myapp                  # secret names, never values (Touch ID)
+secenv list myapp                  # secret names and dates, never values (Touch ID)
+secenv list myapp --older 90d      # secrets not rotated for 90 days
 secenv get myapp OPENAI_API_KEY    # the value (Touch ID); same as myapp/OPENAI_API_KEY
 
 # check a value without printing it

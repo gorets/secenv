@@ -40,7 +40,7 @@ Setup
 Secrets
   set <profile> KEY...     enter secret values (hidden input)
   import <profile> [file]  import keys from a .env file, then reference them
-  list [<profile>]         list profiles, or the secret names of one (ls works too)
+  list [<profile>]         list profiles, or the secrets of one with dates (ls works too)
   get <profile> KEY        print one secret value (terminal only)
   rm <profile> KEY...      remove secrets
   cp <profile>/KEY <profile>[/KEY]
@@ -126,10 +126,14 @@ committed. Empty values and lines that already hold references are skipped.
 
 Rewriting does not wipe the old bytes from the disk: rotate keys that matter.`,
 
-  list: `usage: secenv list [<profile>]   (ls works too)
+  list: `usage: secenv list [<profile> [--older <days>d]]   (ls works too)
 
 Without a profile: lists the profiles (no Touch ID). With one: prints the
-names of its secrets, never the values (Touch ID).`,
+names of its secrets with the dates they were added and last changed, never
+the values (Touch ID). In a pipe it prints the names only.
+
+  --older 90d   only secrets whose value has not changed for 90 days (a
+                rotation check); secrets with no known date count as old`,
 
   get: `usage: secenv get <profile> KEY [--allow-pipe]
        secenv get <profile>/KEY [--allow-pipe]
@@ -352,21 +356,41 @@ function decryptFrom(file) {
   return r.stdout;
 }
 
+// A profile is an encrypted JSON object of entries:
+//   { "KEY": { "value": "...", "added": "<ISO time>", "updated": "<ISO time>" } }
+// Dates live inside the ciphertext, like the key names.
 function loadProfile(name, { mustExist = false } = {}) {
   const file = profileFile(name);
   if (!fs.existsSync(file)) {
     if (mustExist) die(`profile "${name}" not found. Create it: secenv set ${name} KEY`);
     return {};
   }
+  let raw;
   try {
-    return JSON.parse(decryptFrom(file));
+    raw = JSON.parse(decryptFrom(file));
   } catch {
     die('profile contents are corrupted');
   }
+  // Profiles written before 0.7 stored plain strings; their dates are unknown.
+  for (const [k, v] of Object.entries(raw)) if (typeof v === 'string') raw[k] = { value: v, added: null, updated: null };
+  return raw;
 }
 
 function saveProfile(name, data) {
   encryptTo(profileFile(name), JSON.stringify(data));
+}
+
+// Writes a value; `added` is set once, `updated` whenever the value changes.
+function setSecret(data, key, value) {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const prev = data[key];
+  if (prev && prev.value === value) return false;
+  data[key] = { value, added: prev?.added ?? now, updated: now };
+  return true;
+}
+
+function secretValues(data) {
+  return Object.fromEntries(Object.entries(data).map(([k, e]) => [k, e.value]));
 }
 
 // ---------- input ----------
@@ -468,7 +492,7 @@ async function cmdSet(name, keys) {
   if (!keys.length) usageError('set', 'missing secret names');
   keys.forEach(checkKey);
   const data = loadProfile(name);
-  for (const k of keys) data[k] = await promptHidden(`${k}: `, keys.length);
+  for (const k of keys) setSecret(data, k, await promptHidden(`${k}: `, keys.length));
   saveProfile(name, data);
   console.log(`Saved to profile "${name}": ${keys.join(', ')}`);
 }
@@ -585,8 +609,9 @@ async function cmdImport(args) {
     if (!keys.length) die('nothing selected');
   }
 
-  const incoming = Object.fromEntries(keys.map((k) => [k, parsed[k]]));
-  saveProfile(name, { ...loadProfile(name), ...incoming });
+  const data = loadProfile(name);
+  for (const k of keys) setSecret(data, k, parsed[k]);
+  saveProfile(name, data);
   console.log(`Imported ${keys.length} of ${candidates.length} variables into profile "${name}": ${keys.join(', ')}`);
 
   if (rewrite === null && process.stdin.isTTY) {
@@ -687,7 +712,7 @@ function cmdProfileExport(name, { allowPipe, out }) {
     );
   }
   const data = loadProfile(name, { mustExist: true });
-  const text = formatDotenv(data);
+  const text = formatDotenv(secretValues(data));
   if (out) {
     // A shell redirect would use the umask (usually 0644); open the file here.
     try {
@@ -793,9 +818,22 @@ async function cmdProfile(args) {
   }
 }
 
-function cmdList(name) {
+function cmdList(name, { olderDays } = {}) {
   const data = loadProfile(name, { mustExist: true });
-  Object.keys(data).sort().forEach((k) => console.log(k));
+  const day = (iso) => (iso ? iso.slice(0, 10) : '—');
+  let keys = Object.keys(data).sort();
+  if (olderDays !== undefined) {
+    const limit = Date.now() - olderDays * 86400000;
+    // A key with no known date (written before 0.7) counts as old.
+    keys = keys.filter((k) => !data[k].updated || Date.parse(data[k].updated) < limit);
+  }
+  if (!process.stdout.isTTY) return keys.forEach((k) => console.log(k)); // names only for scripts
+  const width = Math.max(0, ...keys.map((k) => k.length));
+  for (const k of keys) {
+    const e = data[k];
+    console.log(`${k.padEnd(width)}   added ${day(e.added)}   updated ${day(e.updated)}`);
+  }
+  if (!keys.length && olderDays !== undefined) process.stderr.write(`No secrets older than ${olderDays} days in "${name}".\n`);
 }
 
 function cmdGet(args) {
@@ -820,7 +858,8 @@ function cmdGet(args) {
   }
   const data = loadProfile(name, { mustExist: true });
   if (!(key in data)) die(`secret "${key}" not found in profile "${name}"`);
-  process.stdout.write(process.stdout.isTTY ? `${data[key]}\n` : data[key]);
+  const value = data[key].value;
+  process.stdout.write(process.stdout.isTTY ? `${value}\n` : value);
 }
 
 // secenv cp|mv <profile>/KEY <profile>[/KEY]: one secret between profiles (or
@@ -844,7 +883,7 @@ function cmdCopyKey(args, { move }) {
   const same = src.name === dst.name;
   const to = same ? from : loadProfile(dst.name);
   if (dstKey in to) die(`"${dstKey}" already exists in profile "${dst.name}"; remove it first: secenv rm ${dst.name}/${dstKey}`);
-  to[dstKey] = from[srcKey];
+  to[dstKey] = { ...from[srcKey] }; // keeps added/updated
   if (move) delete from[srcKey];
   saveProfile(dst.name, to);
   if (move && !same) saveProfile(src.name, from);
@@ -1068,7 +1107,7 @@ async function cmdRun(args) {
       const missing = names.filter((k) => !(k in all));
       if (missing.length) die(`not found in profile "${name}": ${missing.join(', ')}`);
     }
-    loaded.set(name, all);
+    loaded.set(name, secretValues(all));
   }
   const secrets = {};
   if (only) for (const k of only) secrets[k] = loaded.get(profile)[k];
@@ -1304,11 +1343,23 @@ if (isMain) {
       await cmdProfile(cmd === 'profiles' && !rest.length ? ['ls'] : rest);
       break;
     case 'ls':
-    case 'list':
-      if (!rest[0]) cmdProfiles();
-      else if (rest.length > 1) usageError('list', `unexpected argument: ${rest[1]}`);
-      else cmdList(rest[0]);
+    case 'list': {
+      let olderDays;
+      const pos = [];
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === '--older') {
+          const m = String(rest[++i] ?? '').match(/^(\d+)d?$/);
+          if (!m) usageError('list', '--older takes a number of days, e.g. --older 90d');
+          olderDays = Number(m[1]);
+        } else pos.push(rest[i]);
+      }
+      if (!pos[0]) {
+        if (olderDays !== undefined) usageError('list', '--older needs a profile');
+        cmdProfiles();
+      } else if (pos.length > 1) usageError('list', `unexpected argument: ${pos[1]}`);
+      else cmdList(pos[0], { olderDays });
       break;
+    }
     case 'get':
       cmdGet(rest);
       break;

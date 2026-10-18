@@ -4,6 +4,22 @@ All notable changes to secenv. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-10-18
+
+### Added
+
+- Every secret stores the dates it was added and last changed, inside the
+  encrypted profile. `set` and `import` set `added` once and `updated` when the
+  value actually changes; `cp`/`mv` keep the dates.
+- `secenv ls <profile>` shows those dates; `--older 90d` lists only secrets not
+  changed for that many days. In a pipe `ls` still prints names only.
+
+### Changed
+
+- Profile format: each key maps to `{ value, added, updated }` instead of a
+  plain string. Profiles from earlier versions still open; their keys show no
+  date until the next change.
+
 ## [0.6.2] - 2026-10-18
 
 ### Added
@@ -145,6 +161,7 @@ First published version.
 - `--public-env` for non-secret variables.
 - zsh completion, `install.sh` and `uninstall.sh`.
 
+[0.7.0]: https://github.com/gorets/secenv/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/gorets/secenv/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/gorets/secenv/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/gorets/secenv/compare/v0.5.0...v0.6.0
