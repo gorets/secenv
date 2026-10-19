@@ -27,36 +27,49 @@ const REGISTRY = (process.env.SECENV_REGISTRY || 'https://registry.npmjs.org').r
 
 const USAGE = `secenv — personal secrets encrypted with a Secure Enclave key (Touch ID)
 
+A profile is the set of secrets one project needs: myapp, myapp-staging.
+myapp means the whole profile, myapp/NAME one secret in it.
+
 usage: secenv <command> [options]
        secenv <command> --help
 
-Setup
-  setup                    install age + age-plugin-se, create the key, set up completion
-  init                     create the Secure Enclave key (once)
-  completion zsh           print the zsh completion script
-  update [--check]         update a global npm install (asks to confirm)
-  version                  print the installed version
-
 Secrets
-  set <profile> KEY...     enter secret values (hidden input)
-  import <profile> [file]  import keys from a .env file, then reference them
-  list [<profile>]         list profiles, or the secrets of one with dates (ls works too)
-  get <profile> KEY        print one secret value (terminal only)
-  rm <profile> KEY...      remove secrets
-  cp <profile>/KEY <profile>[/KEY]
-                           copy one secret to another profile (or name)
-  mv <profile>/KEY <profile>[/KEY]
-                           move or rename one secret
+  set <profile>/NAME...              enter values (hidden input); overwrites
+  get <profile>/NAME                 print one value (terminal only)
+  rm <profile>/NAME...               remove secrets
+  cp <profile>/NAME <profile>[/NAME] [-f]
+                                     copy one secret (or copy under a new name)
+  mv <profile>/NAME <profile>[/NAME] [-f]
+                                     move or rename one secret
+  list [<profile>] [--older-than 90d]
+                                     profiles, or one profile's secret names (ls)
 
-Profiles
-  profile ls|rm|mv|cp|export|trust
-                           manage profiles and directory approvals
+Import / export
+  import <profile>[/NAME...] [-e <file>]
+                                     .env -> profile, then replace values with secenv:// refs
+  export <profile> [--out <file>]    profile -> .env format, e.g. for a new Mac
 
 Run
-  run [<profile>] [--env <file>|--no-env] -- <command...>
-                           run a command with secrets in its environment
+  run [<profile> | <profile>/NAME...] [-e <file> | --no-env] -- <command...>
+                                     run a command with secrets in its environment
 
-<profile>/KEY is accepted wherever a profile and a key are expected.
+Profiles
+  profile rm <profile> [-y]          delete a profile and all its secrets
+  profile mv <old> <new>             rename
+  profile cp <src> <dst>             copy
+
+Trust (which directories may use which profiles)
+  trust ls [<profile>]               list trusted directories
+  trust rm [<dir>]                   revoke a directory (default: current)
+  trust prune                        drop entries of deleted directories
+
+Setup
+  setup                              install age + plugin, create the key, completion
+  update [--check] [-y]              update a global npm install (asks to confirm)
+  completion zsh                     print the zsh completion script
+  version                            print the installed version
+
+Several secrets of one profile: secenv set myapp/{OPENAI_API_KEY,STRIPE_KEY}
 Every decryption asks for Touch ID.
 `;
 
@@ -66,7 +79,8 @@ const HELP = {
 Prepares a machine after \`npm i -g\`:
   - checks for age and age-plugin-se in the system directories and offers to
     run \`brew install\` for the missing ones
-  - creates the Secure Enclave key if there is none (same as \`secenv init\`)
+  - creates the Secure Enclave key if there is none (\`secenv init\` does only
+    this step; install.sh calls it)
   - installs the zsh completion into Homebrew's site-functions, or tells you
     what to add to ~/.zshrc
 
@@ -77,7 +91,7 @@ Safe to run again: every step skips what is already in place.`,
 Creates the private key in the Secure Enclave (Touch ID required for every
 use) and writes its public part to ~/.config/secenv/recipient.txt. Does
 nothing if a key already exists. The key cannot be exported or backed up:
-losing the Mac means losing the key.
+losing the Mac means losing the key. \`secenv setup\` runs this for you.
 
 SECENV_INSECURE_SOFTWARE_KEY=1  create a plain file key instead (tests only).`,
 
@@ -88,55 +102,70 @@ Prints the zsh completion script. Add to ~/.zshrc after compinit:
 \`secenv setup\` and install.sh install it into Homebrew's site-functions
 instead, which needs no change to ~/.zshrc.`,
 
-  update: `usage: secenv update [--check] [--yes]
+  update: `usage: secenv update [--check] [-y]
 
 Checks the latest version on npm, shows the release notes and a compare link,
 asks for confirmation and installs that exact version with
 \`npm install -g --ignore-scripts\`. Works only for a global npm install.
 
-  --check   only report; install nothing
-  --yes     do not ask (for scripts)`,
+  --check      only report; install nothing
+  -y, --yes    do not ask (for scripts)`,
 
   version: `usage: secenv version   (also -v, --version)
 
 Prints the installed version, or "unknown" for an install.sh copy.`,
 
-  set: `usage: secenv set <profile> KEY [KEY...]
-       secenv set <profile>/KEY [KEY...]
+  set: `usage: secenv set <profile>/NAME [<profile>/NAME...]
 
 Stores secret values in a profile; the profile is created if needed. Values are
-typed hidden (nothing lands in shell history). Existing keys are overwritten.
+typed hidden (nothing lands in shell history). Existing secrets are
+overwritten. All names must be in one profile.
 
-Values can also be piped: one key takes the whole input (multi-line is fine),
-several keys take one line each:
-  cat key.pem | secenv set myapp PRIVATE_KEY
-  printf 'a\\nb\\n' | secenv set myapp KEY1 KEY2`,
+  secenv set myapp/OPENAI_API_KEY
+  secenv set myapp/{OPENAI_API_KEY,STRIPE_KEY}     # the shell expands the braces
 
-  import: `usage: secenv import <profile> [<file>] [--all | --only KEY,KEY] [--rewrite | --keep]
+Values can also be piped: one secret takes the whole input (multi-line is
+fine), several take one line each:
+  cat key.pem | secenv set myapp/PRIVATE_KEY
+  printf 'a\\nb\\n' | secenv set myapp/{KEY1,KEY2}`,
+
+  import: `usage: secenv import <profile> [-e <file>] [--all] [--rewrite | --no-rewrite]
+       secenv import <profile>/NAME [<profile>/NAME...] [-e <file>] [--rewrite | --no-rewrite]
 
 Reads a .env file (default ./.env), lets you pick which variables to store in
 the profile, then offers to replace their values in the file with
-secenv://<profile>/KEY references, so the file holds no secrets and can be
+secenv://<profile>/NAME references, so the file holds no secrets and can be
 committed. Empty values and lines that already hold references are skipped.
+With <profile>/NAME items, only those are imported and there is no picker.
 
-  --all             import every variable, no picker (default without a terminal)
-  --only KEY,KEY    import only these, no picker
-  --rewrite         replace the imported values in the file without asking
-  --keep            leave the file as it is
+  -e, --env <file>   the file to read (default ./.env)
+  --all              import every variable, no picker (default without a terminal)
+  --rewrite          replace the imported values in the file without asking
+  --no-rewrite       leave the file as it is
 
 Rewriting does not wipe the old bytes from the disk: rotate keys that matter.`,
 
-  list: `usage: secenv list [<profile> [--older <days>d]]   (ls works too)
+  export: `usage: secenv export <profile> [--out <file>] [--allow-pipe]
+
+Prints a profile in .env format (Touch ID), for example to move it to a new
+Mac: the Secure Enclave key cannot be moved, so plaintext is the only way.
+
+  --out <file>    write a new file with mode 0600 instead (refuses to overwrite)
+  --allow-pipe    allow writing into a pipe
+
+On the new Mac: secenv import myapp -e myapp.env && rm myapp.env`,
+
+  list: `usage: secenv list [<profile>] [--older-than <n>d|w|m]   (also: ls)
 
 Without a profile: lists the profiles (no Touch ID). With one: prints the
 names of its secrets with the dates they were added and last changed, never
 the values (Touch ID). In a pipe it prints the names only.
 
-  --older 90d   only secrets whose value has not changed for 90 days (a
-                rotation check); secrets with no known date count as old`,
+  --older-than 90d   only secrets whose value has not changed for 90 days
+                     (d, w or m; a rotation check). Secrets with no known
+                     date count as old.`,
 
-  get: `usage: secenv get <profile> KEY [--allow-pipe]
-       secenv get <profile>/KEY [--allow-pipe]
+  get: `usage: secenv get <profile>/NAME [--allow-pipe]
 
 Prints one secret value to the terminal (Touch ID). Into a pipe or $(...) it
 refuses unless --allow-pipe is given: a secret on a command line is visible to
@@ -144,68 +173,79 @@ every process through ps. Prefer \`secenv run\`, which passes secrets through
 the environment:
   secenv run myapp -- sh -c 'tool --key "$API_KEY"'`,
 
-  rm: `usage: secenv rm <profile> KEY [KEY...]
-       secenv rm <profile>/KEY [KEY...]
+  rm: `usage: secenv rm <profile>/NAME [<profile>/NAME...]
 
-Removes secrets from a profile (Touch ID). To delete a whole profile use
-\`secenv profile rm <profile>\`.`,
+Removes secrets from a profile (Touch ID). A name that is not in the profile
+is an error and nothing is removed. To delete a whole profile:
+secenv profile rm <profile>.`,
 
-  cp: `usage: secenv cp <profile>/KEY <profile>[/KEY]
+  cp: `usage: secenv cp <profile>/NAME <profile>[/NAME] [-f]
 
 Copies one secret into another profile, optionally under a new name. The
-destination profile is created if needed; an existing key there is not
-overwritten. Two profiles mean two decryptions (two Touch ID prompts).
-  secenv cp ai/OPENAI_API_KEY myai
-  secenv cp ai/OPENAI_API_KEY myai/OPENAI_KEY`,
+destination profile is created if needed. Two profiles mean two decryptions
+(two Touch ID prompts).
 
-  mv: `usage: secenv mv <profile>/KEY <profile>[/KEY]
+  -f, --force   overwrite the secret if it already exists there
+
+  secenv cp ai/OPENAI_API_KEY myapp
+  secenv cp myapp/OPENAI_API_KEY myapp-staging/OPENAI_KEY`,
+
+  mv: `usage: secenv mv <profile>/NAME <profile>[/NAME] [-f]
 
 Moves one secret to another profile, or renames it inside the same profile.
-Same rules as cp; the source key is removed afterwards.
-  secenv mv ai/OPENAI_API_KEY myai
-  secenv mv myai/OPENAI_KEY myai/OPENAI_API_KEY`,
+Same rules as cp; the source secret is removed afterwards.
+
+  -f, --force   overwrite the secret if it already exists there
+
+  secenv mv myapp/OPENAI_KEY myapp/OPENAI_API_KEY
+  secenv mv myapp/STRIPE_KEY billing`,
 
   profile: `usage: secenv profile <action>
 
-  ls                          list profiles (list works too)
-  <name> [ls]                 list the secrets of a profile (same as secenv ls <name>)
-  rm <name> [--yes]           delete a profile and all its secrets (asks)
-  mv <old> <new>              rename a profile
-  cp <src> <dst>              copy a profile
-  export <name> [--out <file>] [--allow-pipe]
-                              print a profile in .env format (Touch ID);
-                              --out writes a 0600 file instead
-  trust ls [<profile>]        list directories approved to use a profile (list works too)
-  trust rm <dir>              revoke a directory's approvals
-  trust prune                 drop approvals of deleted directories
+  rm <profile> [-y]     delete a profile and all its secrets (asks)
+  mv <old> <new>        rename a profile
+  cp <src> <dst>        copy a profile
 
-ls, rm, mv, cp and trust work on files only: no Touch ID.`,
+These work on the encrypted files: no Touch ID. To list profiles or their
+secrets use \`secenv list\`; to print one use \`secenv export\`.`,
 
-  run: `usage: secenv run [<profile>] [--env <file> | --no-env] -- <command...>
-       secenv run <profile>/KEY [<profile>/KEY...] -- <command...>
+  trust: `usage: secenv trust <action>
+
+  ls [<profile>]        list trusted directories (only those using <profile>)
+  rm [<dir>]            revoke a directory (default: the current one)
+  prune                 drop entries of directories that no longer exist
+
+The first \`secenv run\` of a profile in a directory asks whether to trust that
+directory with it; the answers are kept in ~/.config/secenv/trusted.json.
+No Touch ID.`,
+
+  run: `usage: secenv run [<profile>] [-e <file> | --no-env] -- <command...>
+       secenv run <profile>/NAME [<profile>/NAME...] [-e <file> | --no-env] -- <command...>
 
 Decrypts the profile (Touch ID) and runs the command with the secrets in its
 environment. Nothing is written to disk. The exit code is the command's.
+<profile>/NAME items pass only the listed secrets (all from one profile).
 
 Profile, in this order: the argument, $SECENV_PROFILE, ./.secenv (one line),
-or secenv://<profile>/KEY references in the env file. References may name
+or secenv://<profile>/NAME references in the env file. References may name
 other profiles too, but each profile is a separate decryption (one Touch ID
 each): keep one profile per project.
 
-Env file: ./.env is read like dotenv when present (or the file given with
---env). A value secenv://KEY or secenv://<profile>/KEY is replaced with that
-secret and only the referenced secrets are passed; other values pass as they
-are, except PATH, NODE_OPTIONS, NODE_PATH, DYLD_* and LD_*, which are ignored.
+  -e, --env <file>   env file to read instead of ./.env
+  --no-env           read no env file
 
-<profile>/KEY items pass only the listed secrets.
+Env file: ./.env is read like dotenv when present. A value secenv://NAME or
+secenv://<profile>/NAME is replaced with that secret and only the referenced
+secrets are passed; other values pass as they are, except PATH, NODE_OPTIONS,
+NODE_PATH, DYLD_* and LD_*, which are ignored.
 
-The first use of a profile in a directory asks for approval, whatever named
-the profile; approvals are per directory (\`secenv profile trust ls\`). Before
-every decryption one line is printed:  secenv: <profile> (<source>) -> <command>
+The first use of a profile in a directory asks whether to trust the directory
+with it, whatever named the profile (\`secenv trust ls\`). Before every
+decryption one line is printed:  secenv: <profile> (<source>) -> <command>
 
 Examples:
   secenv run myapp -- node app.js
-  secenv run myapp/OPENAI_API_KEY -- node script.js
+  secenv run myapp/{OPENAI_API_KEY,DB_URL} -- node script.js
   secenv run -- npm start            # profile from .secenv or .env references
   secenv run myapp --no-env -- env`,
 };
@@ -253,13 +293,61 @@ function checkKey(key) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) die(`invalid variable name: ${key}`);
 }
 
-// Accepts both `<profile> KEY [KEY...]` and the `<profile>/KEY [KEY...]`
-// shorthand; profile names cannot contain a slash, so the split is unambiguous.
-function splitProfileKeys(args) {
-  const [first = '', ...rest] = args;
-  const i = first.lastIndexOf('/');
-  if (i === -1) return { name: first, keys: rest };
-  return { name: first.slice(0, i), keys: [first.slice(i + 1), ...rest] };
+// Splits command arguments into options and positionals. `spec` maps every
+// accepted option to its field: { '--all': 'all' } for a switch, and
+// { '-e': ['env'] } for an option that takes a value. Anything else that
+// starts with "-" is a usage error, so a typo is never taken for a name.
+function parseArgs(cmd, args, spec = {}, action) {
+  const opts = {};
+  const pos = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith('-') || a === '-') {
+      pos.push(a);
+      continue;
+    }
+    const field = spec[a];
+    if (field === undefined) usageError(cmd, `unknown option: ${a}`, action);
+    if (Array.isArray(field)) {
+      const v = args[++i];
+      if (v === undefined || v === '') usageError(cmd, `${a} requires a value`, action);
+      opts[field[0]] = v;
+    } else opts[field] = true;
+  }
+  return { opts, pos };
+}
+
+// A secret is addressed as <profile>/NAME everywhere; a bare <profile> means
+// the whole profile. Profile names cannot contain a slash, so the split is
+// unambiguous. Returns null for anything without a slash.
+function parseAddress(arg) {
+  const i = arg.lastIndexOf('/');
+  if (i === -1) return null;
+  const profile = arg.slice(0, i);
+  const name = arg.slice(i + 1);
+  profileFile(profile);
+  checkKey(name);
+  return { profile, name };
+}
+
+// One or more <profile>/NAME items, all in one profile (one decryption).
+function parseAddresses(cmd, args) {
+  if (!args.length) usageError(cmd, 'missing <profile>/NAME');
+  let profile;
+  const names = [];
+  for (const arg of args) {
+    const addr = parseAddress(arg);
+    if (!addr) {
+      const hint = PROFILE_NAME.test(arg) ? ` (for example ${arg}/API_KEY)` : '';
+      usageError(cmd, `expected <profile>/NAME, got "${arg}"${hint}`);
+    }
+    if (profile !== undefined && addr.profile !== profile) {
+      die(`all secrets in one command must be in one profile: ${profile} and ${addr.profile}`);
+    }
+    profile = addr.profile;
+    if (!names.includes(addr.name)) names.push(addr.name);
+  }
+  return { profile, names };
 }
 
 // ---------- external tools ----------
@@ -362,7 +450,7 @@ function decryptFrom(file) {
 function loadProfile(name, { mustExist = false } = {}) {
   const file = profileFile(name);
   if (!fs.existsSync(file)) {
-    if (mustExist) die(`profile "${name}" not found. Create it: secenv set ${name} KEY`);
+    if (mustExist) die(`profile "${name}" not found. Create it: secenv set ${name}/NAME`);
     return {};
   }
   let raw;
@@ -484,13 +572,12 @@ function cmdInit() {
   }
   fs.writeFileSync(RECIPIENT, `${m[1]}\n`, { mode: 0o600 });
   console.log(`Done. Public key: ${m[1]}`);
-  console.log('Next: secenv set <profile> KEY [KEY...]');
+  console.log('Next: secenv set myapp/OPENAI_API_KEY   (or secenv import myapp)');
 }
 
-async function cmdSet(name, keys) {
-  if (!name) usageError('set', 'missing profile');
-  if (!keys.length) usageError('set', 'missing secret names');
-  keys.forEach(checkKey);
+async function cmdSet(args) {
+  const { pos } = parseArgs('set', args);
+  const { profile: name, names: keys } = parseAddresses('set', pos);
   const data = loadProfile(name);
   for (const k of keys) setSecret(data, k, await promptHidden(`${k}: `, keys.length));
   saveProfile(name, data);
@@ -564,24 +651,27 @@ function rewriteDotenv(file, profile, keys) {
 }
 
 async function cmdImport(args) {
-  let all = false;
+  const { opts, pos } = parseArgs('import', args, {
+    '-e': ['file'],
+    '--env': ['file'],
+    '--all': 'all',
+    '--rewrite': 'rewrite',
+    '--no-rewrite': 'noRewrite',
+  });
+  if (opts.rewrite && opts.noRewrite) usageError('import', '--rewrite and --no-rewrite exclude each other');
+  let rewrite = opts.rewrite ? true : opts.noRewrite ? false : null; // null: ask
+  const file = opts.file ?? '.env';
+  if (!pos.length) usageError('import', 'missing profile');
+  let name;
   let only = null;
-  let rewrite = null; // true: --rewrite, false: --keep, null: ask
-  const pos = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === '--all') all = true;
-    else if (a === '--rewrite') rewrite = true;
-    else if (a === '--keep') rewrite = false;
-    else if (a === '--only') {
-      only = (args[++i] || '').split(',').filter(Boolean);
-      if (!only.length) die('--only requires a comma-separated list of keys');
-      only.forEach(checkKey);
-    } else pos.push(a);
+  if (pos.length === 1 && !pos[0].includes('/')) name = pos[0];
+  else {
+    const stray = pos.slice(1).find((a) => !a.includes('/')) ?? pos.find((a) => !a.includes('/'));
+    if (stray) usageError('import', `unexpected argument: ${stray} (a file goes after -e)`);
+    ({ profile: name, names: only } = parseAddresses('import', pos));
+    if (opts.all) usageError('import', '--all and <profile>/NAME items exclude each other');
   }
-  const [name, file = '.env'] = pos;
-  if (!name) usageError('import', 'missing profile');
-  if (pos.length > 2) usageError('import', `unexpected argument: ${pos[2]}`);
+  const all = Boolean(opts.all);
   profileFile(name); // validate the name before touching the file
   if (!fs.existsSync(file)) usageError('import', `file not found: ${file}`);
 
@@ -610,12 +700,14 @@ async function cmdImport(args) {
   }
 
   const data = loadProfile(name);
+  const overwritten = keys.filter((k) => k in data && data[k].value !== parsed[k]);
+  if (overwritten.length) process.stderr.write(`secenv: overwriting in "${name}": ${overwritten.join(', ')}\n`);
   for (const k of keys) setSecret(data, k, parsed[k]);
   saveProfile(name, data);
   console.log(`Imported ${keys.length} of ${candidates.length} variables into profile "${name}": ${keys.join(', ')}`);
 
   if (rewrite === null && process.stdin.isTTY) {
-    rewrite = await confirm(`Replace those values in ${file} with secenv://${name}/KEY references?`);
+    rewrite = await confirm(`Replace those values in ${file} with secenv://${name}/NAME references?`);
   }
   if (rewrite) {
     rewriteDotenv(file, name, keys);
@@ -634,7 +726,7 @@ function cmdProfiles() {
   } catch {}
   const names = files.filter((f) => f.endsWith('.age')).map((f) => f.slice(0, -4)).sort();
   if (!names.length) {
-    process.stderr.write('No profiles yet. Create one: secenv set <profile> KEY\n');
+    process.stderr.write('No profiles yet. Create one: secenv set myapp/OPENAI_API_KEY\n');
     return;
   }
   names.forEach((n) => console.log(n));
@@ -655,7 +747,7 @@ function trustedDirsFor(name) {
 async function cmdProfileRm(name, yes) {
   const file = existingProfileFile(name);
   if (!yes) {
-    if (!process.stdin.isTTY) die('refusing to delete without a terminal; add --yes');
+    if (!process.stdin.isTTY) die('refusing to delete without a terminal; add -y');
     if (!(await confirm(`Delete profile "${name}" and all its secrets? This cannot be undone.`))) die('cancelled');
   }
   fs.unlinkSync(file);
@@ -702,7 +794,12 @@ function cmdProfileCp(from, to) {
 
 // Plaintext dump in .env format, e.g. to move secrets to a new Mac (the Secure
 // Enclave key cannot be moved). Same guard as get: terminal only by default.
-function cmdProfileExport(name, { allowPipe, out }) {
+function cmdExport(args) {
+  const { opts, pos } = parseArgs('export', args, { '--out': ['out'], '--allow-pipe': 'allowPipe' });
+  if (pos.length !== 1) usageError('export', pos.length ? `unexpected argument: ${pos[1]}` : 'missing profile');
+  const [name] = pos;
+  const { allowPipe, out } = opts;
+  if (name.includes('/')) usageError('export', 'export takes a whole profile, not <profile>/NAME');
   existingProfileFile(name);
   if (!out && !process.stdout.isTTY && !allowPipe) {
     die(
@@ -729,26 +826,26 @@ function cmdProfileExport(name, { allowPipe, out }) {
   }
 }
 
-// Approvals of project .secenv files (directory -> profile), see trustedProjectProfile.
+// Trusted directories (directory -> profiles), see approveRun.
 function cmdTrustLs(profile) {
   const entries = Object.entries(readTrusted())
     .filter(([, list]) => !profile || list.includes(profile))
     .sort(([a], [b]) => a.localeCompare(b));
   if (!entries.length) {
-    process.stderr.write('No approved directories.\n');
+    process.stderr.write('No trusted directories.\n');
     return;
   }
   for (const [dir, list] of entries) {
     const gone = !fs.existsSync(dir);
-    console.log(`${dir}  ->  ${list.join(', ')}${gone ? '  (directory gone, run: secenv profile trust prune)' : ''}`);
+    console.log(`${dir}  ->  ${list.join(', ')}${gone ? '  (directory gone, run: secenv trust prune)' : ''}`);
   }
 }
 
-function cmdTrustRm(target) {
+function cmdTrustRm(target = '.') {
   const trusted = readTrusted();
   let dir = path.resolve(target);
   if (!(dir in trusted) && fs.existsSync(dir)) dir = fs.realpathSync(dir);
-  if (!(dir in trusted)) die(`no approval for ${dir}`);
+  if (!(dir in trusted)) die(`not trusted: ${dir}`);
   const list = trusted[dir];
   delete trusted[dir];
   writeTrusted(trusted);
@@ -762,63 +859,65 @@ function cmdTrustPrune() {
   const gone = Object.keys(trusted).filter((dir) => !fs.existsSync(dir));
   gone.forEach((dir) => delete trusted[dir]);
   if (gone.length) writeTrusted(trusted);
-  console.log(gone.length ? `Removed ${gone.length} stale approval(s):\n  ${gone.join('\n  ')}` : 'Nothing to prune.');
+  console.log(gone.length ? `Removed ${gone.length} deleted director${gone.length === 1 ? 'y' : 'ies'}:\n  ${gone.join('\n  ')}` : 'Nothing to prune.');
 }
 
 
 async function cmdProfile(args) {
   const [action, ...rest] = args;
-  const yes = rest.includes('--yes');
-  const allowPipe = rest.includes('--allow-pipe');
-  let out;
-  const pos = [];
-  for (let i = 0; i < rest.length; i++) {
-    if (rest[i] === '--yes' || rest[i] === '--allow-pipe') continue;
-    if (rest[i] === '--out') {
-      out = rest[++i];
-      if (!out) die('--out requires a file');
-    } else pos.push(rest[i]);
-  }
+  const { opts, pos } = parseArgs('profile', rest, action === 'rm' ? { '-y': 'yes', '--yes': 'yes' } : {}, action);
   const needArgs = (n) => {
     if (pos.length !== n) usageError('profile', `${action}: expected ${n} argument${n === 1 ? '' : 's'}, got ${pos.length}`, action);
   };
   switch (action) {
-    case 'ls':
-    case 'list':
-      needArgs(0);
-      return cmdProfiles();
     case 'rm':
       needArgs(1);
-      return cmdProfileRm(pos[0], yes);
+      return cmdProfileRm(pos[0], opts.yes);
     case 'mv':
       needArgs(2);
       return cmdProfileMv(pos[0], pos[1]);
     case 'cp':
       needArgs(2);
       return cmdProfileCp(pos[0], pos[1]);
+    case 'ls':
+    case 'list':
+      return usageError('profile', 'to list profiles: secenv list');
     case 'export':
-      needArgs(1);
-      return cmdProfileExport(pos[0], { allowPipe, out });
-    case 'trust': {
-      const [sub, ...targs] = pos;
-      if ((sub === 'ls' || sub === 'list') && targs.length <= 1) return cmdTrustLs(targs[0]);
-      if (sub === 'rm' && targs.length === 1) return cmdTrustRm(targs[0]);
-      if (sub === 'prune' && !targs.length) return cmdTrustPrune();
-      usageError('profile', sub ? `trust ${sub}: wrong arguments` : 'trust: missing action (ls, rm, prune)', sub ? `trust ${sub}` : undefined);
-    }
-    default: {
-      // `secenv profile <name>` / `secenv profile <name> ls`: the keys of that
-      // profile, same as `secenv list <name>`. Actions win over profile names.
-      if (action && PROFILE_NAME.test(action) && fs.existsSync(path.join(STORE, `${action}.age`))) {
-        if (!pos.length || (pos.length === 1 && (pos[0] === 'ls' || pos[0] === 'list'))) return cmdList(action);
-        usageError('profile', `${action} is a profile; to list its secrets: secenv profile ${action}`);
-      }
-      usageError('profile', action ? `unknown action or profile: ${action}` : 'missing action');
-    }
+      return usageError('profile', `export is a top-level command: secenv export ${pos[0] ?? '<profile>'}`);
+    case 'trust':
+      return usageError('profile', 'trust is a top-level command: secenv trust ls|rm|prune');
+    default:
+      usageError('profile', action ? `unknown action: ${action}` : 'missing action (rm, mv, cp)');
   }
 }
 
-function cmdList(name, { olderDays } = {}) {
+function cmdTrust(args) {
+  const [action, ...rest] = args;
+  const { pos } = parseArgs('trust', rest, {}, action);
+  if (action === 'ls' && pos.length <= 1) return cmdTrustLs(pos[0]);
+  if (action === 'rm' && pos.length <= 1) return cmdTrustRm(pos[0]);
+  if (action === 'prune' && !pos.length) return cmdTrustPrune();
+  if (['ls', 'rm', 'prune'].includes(action)) usageError('trust', `${action}: unexpected argument: ${pos.at(-1)}`, action);
+  usageError('trust', action ? `unknown action: ${action}` : 'missing action (ls, rm, prune)');
+}
+
+const PERIOD_DAYS = { d: 1, w: 7, m: 30 };
+
+function cmdList(args) {
+  const { opts, pos } = parseArgs('list', args, { '--older-than': ['olderThan'] });
+  let olderDays;
+  if (opts.olderThan !== undefined) {
+    const m = opts.olderThan.match(/^(\d+)([dwm]?)$/);
+    if (!m) usageError('list', '--older-than takes a period such as 90d, 12w or 6m');
+    olderDays = Number(m[1]) * PERIOD_DAYS[m[2] || 'd'];
+  }
+  if (pos.length > 1) usageError('list', `unexpected argument: ${pos[1]}`);
+  const [name] = pos;
+  if (!name) {
+    if (olderDays !== undefined) usageError('list', '--older-than needs a profile');
+    return cmdProfiles();
+  }
+  if (name.includes('/')) usageError('list', 'list takes a profile, not <profile>/NAME');
   const data = loadProfile(name, { mustExist: true });
   const day = (iso) => (iso ? iso.slice(0, 10) : '—');
   let keys = Object.keys(data).sort();
@@ -837,17 +936,11 @@ function cmdList(name, { olderDays } = {}) {
 }
 
 function cmdGet(args) {
-  let allowPipe = false;
-  const pos = [];
-  for (const a of args) {
-    if (a === '--allow-pipe') allowPipe = true;
-    else pos.push(a);
-  }
-  const { name, keys } = splitProfileKeys(pos);
-  if (!name) usageError('get', 'missing profile');
-  if (keys.length !== 1) usageError('get', keys.length ? 'one KEY at a time' : 'missing KEY');
-  const [key] = keys;
-  checkKey(key);
+  const { opts, pos } = parseArgs('get', args, { '--allow-pipe': 'allowPipe' });
+  const { allowPipe } = opts;
+  if (pos.length > 1) usageError('get', 'one <profile>/NAME at a time');
+  const { profile: name, names } = parseAddresses('get', pos);
+  const [key] = names;
   if (!process.stdout.isTTY && !allowPipe) {
     die(
       'refusing to print a secret into a pipe or $(...): as a command-line argument it is ' +
@@ -866,23 +959,23 @@ function cmdGet(args) {
 // a rename inside one). Each profile involved is one decryption.
 function cmdCopyKey(args, { move }) {
   const verb = move ? 'mv' : 'cp';
-  if (args.length !== 2) usageError(verb, args.length < 2 ? 'need a source and a destination' : `unexpected argument: ${args[2]}`);
-  const src = splitProfileKeys([args[0]]);
-  if (!src.name || src.keys.length !== 1) usageError(verb, 'source must be <profile>/KEY');
-  const dst = splitProfileKeys([args[1]]);
-  if (!dst.name) usageError(verb, 'destination must be <profile> or <profile>/KEY');
-  const srcKey = src.keys[0];
-  const dstKey = dst.keys[0] ?? srcKey;
-  checkKey(srcKey);
-  checkKey(dstKey);
-  profileFile(dst.name);
+  const { opts, pos } = parseArgs(verb, args, { '-f': 'force', '--force': 'force' });
+  if (pos.length !== 2) usageError(verb, pos.length < 2 ? 'need a source and a destination' : `unexpected argument: ${pos[2]}`);
+  const from0 = parseAddress(pos[0]);
+  if (!from0) usageError(verb, `source must be <profile>/NAME, got "${pos[0]}"`);
+  const to0 = parseAddress(pos[1]) ?? { profile: pos[1], name: from0.name };
+  profileFile(to0.profile);
+  const src = { name: from0.profile };
+  const dst = { name: to0.profile };
+  const srcKey = from0.name;
+  const dstKey = to0.name;
   if (src.name === dst.name && srcKey === dstKey) die('source and destination are the same');
 
   const from = loadProfile(src.name, { mustExist: true });
   if (!(srcKey in from)) die(`secret "${srcKey}" not found in profile "${src.name}"`);
   const same = src.name === dst.name;
   const to = same ? from : loadProfile(dst.name);
-  if (dstKey in to) die(`"${dstKey}" already exists in profile "${dst.name}"; remove it first: secenv rm ${dst.name}/${dstKey}`);
+  if (dstKey in to && !opts.force) die(`"${dstKey}" already exists in profile "${dst.name}"; add -f to overwrite it`);
   to[dstKey] = { ...from[srcKey] }; // keeps added/updated
   if (move) delete from[srcKey];
   saveProfile(dst.name, to);
@@ -890,14 +983,18 @@ function cmdCopyKey(args, { move }) {
   console.log(`${move ? 'Moved' : 'Copied'} ${src.name}/${srcKey} -> ${dst.name}/${dstKey}`);
 }
 
-function cmdRm(name, keys) {
-  if (!name) usageError('rm', 'missing profile');
-  if (!keys.length) usageError('rm', 'missing secret names');
-  keys.forEach(checkKey);
+function cmdRm(args) {
+  const { pos } = parseArgs('rm', args);
+  if (pos.length === 1 && !pos[0].includes('/') && PROFILE_NAME.test(pos[0])) {
+    usageError('rm', `rm removes secrets: secenv rm ${pos[0]}/NAME. To delete the whole profile: secenv profile rm ${pos[0]}`);
+  }
+  const { profile: name, names: keys } = parseAddresses('rm', pos);
   const data = loadProfile(name, { mustExist: true });
+  const missing = keys.filter((k) => !(k in data));
+  if (missing.length) die(`not found in profile "${name}": ${missing.join(', ')} (nothing removed)`);
   for (const k of keys) delete data[k];
   saveProfile(name, data);
-  console.log(`Removed: ${keys.join(', ')}`);
+  console.log(`Removed from "${name}": ${keys.join(', ')}`);
 }
 
 // The profile in ./.secenv decides which secrets the launched code receives, so
@@ -971,11 +1068,11 @@ async function approveRun(profile, source, cmd) {
   const question =
     `secenv: first use of profile "${profile}" (${source}) in ${dir}\n` +
     `  command: ${cmd.join(' ')}\n` +
-    `Allow this directory to use "${profile}" from now on?`;
+    `Trust this directory to use "${profile}" from now on?`;
   const ok = await confirm(question);
   if (ok === null) {
     die(
-      `profile "${profile}" (${source}) is not approved for ${dir} and there is no terminal to ask. ` +
+      `profile "${profile}" (${source}) is not trusted in ${dir} and there is no terminal to ask. ` +
         'Run it once interactively.',
     );
   }
@@ -1007,26 +1104,18 @@ async function cmdRun(args) {
   const head = args.slice(0, sep);
   const cmd = args.slice(sep + 1);
 
+  const { opts, pos } = parseArgs('run', head, { '-e': ['envFile'], '--env': ['envFile'], '--no-env': 'noEnv' });
+  let { envFile } = opts;
+  const { noEnv } = opts;
+  if (envFile && noEnv) usageError('run', '--env and --no-env exclude each other');
   let profile;
-  let envFile;
-  let noEnv = false;
-  // `<profile>/KEY` items limit the child to the listed secrets only.
+  // `<profile>/NAME` items limit the child to the listed secrets only.
   let only = null;
-  for (let i = 0; i < head.length; i++) {
-    if (head[i] === '--env' || head[i] === '--public-env') {
-      envFile = head[++i];
-      if (!envFile) die(`${head[i - 1]} requires a file`);
-    } else if (head[i] === '--no-env') {
-      noEnv = true;
-    } else if (head[i].includes('/')) {
-      const { name, keys } = splitProfileKeys([head[i]]);
-      if (profile && only === null) die(`unexpected argument: ${head[i]}`);
-      if (profile && profile !== name) die(`all <profile>/KEY items must use one profile: ${head[i]}`);
-      checkKey(keys[0]);
-      profile = name;
-      (only ??= []).push(keys[0]);
-    } else if (!profile) profile = head[i];
-    else die(`unexpected argument: ${head[i]}`);
+  if (pos.length === 1 && !pos[0].includes('/')) profile = pos[0];
+  else if (pos.length) {
+    const stray = pos.slice(1).find((a) => !a.includes('/')) ?? pos.find((a) => !a.includes('/'));
+    if (stray) usageError('run', `unexpected argument: ${stray} (either one <profile> or <profile>/NAME items)`);
+    ({ profile, names: only } = parseAddresses('run', pos));
   }
 
   // Env file: --env <file>, else ./.env when present (like dotenv), unless --no-env.
@@ -1089,7 +1178,7 @@ async function cmdRun(args) {
     process.stderr.write(
       `secenv: warning: ${envFile} references ${profiles.length} profiles (${profiles.join(', ')}). ` +
         `Each one is a separate decryption, so expect ${profiles.length} Touch ID prompts per run. ` +
-        'Prefer one profile per project: secenv set <project> KEY..., or secenv import <project>.\n',
+        'Prefer one profile per project: secenv set myapp/NAME, or secenv import myapp.\n',
     );
   }
 
@@ -1246,8 +1335,9 @@ async function releaseNotes(repo, from, to) {
 // Updates a global npm install to an exact, explicitly confirmed version: this
 // tool sees every secret, so it never updates itself silently.
 async function cmdUpdate(args) {
-  const check = args.includes('--check');
-  const yes = args.includes('--yes');
+  const { opts, pos } = parseArgs('update', args, { '--check': 'check', '-y': 'yes', '--yes': 'yes' });
+  if (pos.length) usageError('update', `unexpected argument: ${pos[0]}`);
+  const { check, yes } = opts;
   const pkg = readPackage();
   if (!pkg) {
     die('installed with install.sh: update with "git pull && ./install.sh" in your secenv checkout.');
@@ -1289,7 +1379,7 @@ async function cmdUpdate(args) {
   }
 
   if (!yes) {
-    if (!process.stdin.isTTY) die('refusing to update without a terminal; add --yes');
+    if (!process.stdin.isTTY) die('refusing to update without a terminal; add -y');
     if (!(await confirm(`Install ${pkg.name}@${latest}?`))) die('cancelled');
   }
   const install = spawnSync('npm', ['install', '-g', '--ignore-scripts', `${pkg.name}@${latest}`], { stdio: 'inherit' });
@@ -1329,50 +1419,36 @@ if (isMain) {
     case 'completion':
       cmdCompletion(rest[0]);
       break;
-    case 'set': {
-      const { name, keys } = splitProfileKeys(rest);
-      await cmdSet(name, keys);
+    case 'set':
+      await cmdSet(rest);
       break;
-    }
-    case 'import':
-      await cmdImport(rest);
-      break;
-    // `profile <action>` is the canonical form; bare `profiles` means `profile ls`.
-    case 'profile':
-    case 'profiles':
-      await cmdProfile(cmd === 'profiles' && !rest.length ? ['ls'] : rest);
-      break;
-    case 'ls':
-    case 'list': {
-      let olderDays;
-      const pos = [];
-      for (let i = 0; i < rest.length; i++) {
-        if (rest[i] === '--older') {
-          const m = String(rest[++i] ?? '').match(/^(\d+)d?$/);
-          if (!m) usageError('list', '--older takes a number of days, e.g. --older 90d');
-          olderDays = Number(m[1]);
-        } else pos.push(rest[i]);
-      }
-      if (!pos[0]) {
-        if (olderDays !== undefined) usageError('list', '--older needs a profile');
-        cmdProfiles();
-      } else if (pos.length > 1) usageError('list', `unexpected argument: ${pos[1]}`);
-      else cmdList(pos[0], { olderDays });
-      break;
-    }
     case 'get':
       cmdGet(rest);
       break;
-    case 'rm': {
-      const { name, keys } = splitProfileKeys(rest);
-      cmdRm(name, keys);
+    case 'rm':
+      cmdRm(rest);
       break;
-    }
     case 'cp':
       cmdCopyKey(rest, { move: false });
       break;
     case 'mv':
       cmdCopyKey(rest, { move: true });
+      break;
+    case 'ls':
+    case 'list':
+      cmdList(rest);
+      break;
+    case 'import':
+      await cmdImport(rest);
+      break;
+    case 'export':
+      cmdExport(rest);
+      break;
+    case 'profile':
+      await cmdProfile(rest);
+      break;
+    case 'trust':
+      cmdTrust(rest);
       break;
     case 'run':
       await cmdRun(rest);

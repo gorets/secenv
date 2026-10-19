@@ -2,30 +2,45 @@
 # zsh completion for secenv: subcommands, profile names, and whatever the
 # wrapped command normally completes after `--`.
 
-_secenv_profiles() {
+_secenv_profile_names() {
   local dir=${SECENV_HOME:-$HOME/.config/secenv}/profiles
-  local -a profiles
-  profiles=(${${(f)"$(command ls -- "$dir" 2>/dev/null)"}%.age})
-  _describe -t profiles 'profile' profiles
+  reply=(${${(f)"$(command ls -- "$dir" 2>/dev/null)"}%.age})
+}
+
+# Whole profiles: myapp
+_secenv_profiles() {
+  local -a reply
+  _secenv_profile_names
+  _describe -t profiles 'profile' reply
+}
+
+# The start of a <profile>/NAME address: completes "myapp/" and leaves the
+# name to be typed (names are inside the ciphertext, reading them needs Touch ID).
+_secenv_addresses() {
+  local -a reply
+  _secenv_profile_names
+  compadd -S / -q -- $reply
 }
 
 _secenv() {
   local -a cmds
   cmds=(
-    'setup:install dependencies, create the key, set up completion'
-    'init:create the Secure Enclave key'
-    'completion:print the shell completion script'
-    'update:update a global npm install'
     'set:enter secret values'
-    'import:import an existing .env file'
-    'profile:manage profiles (ls, rm, mv, cp, export, trust)'
-    'list:list profiles, or the secrets of one'
-    'ls:same as list'
     'get:print one secret value (terminal only)'
     'rm:remove secrets'
-    'cp:copy one secret to another profile'
+    'cp:copy one secret'
     'mv:move or rename one secret'
+    'list:list profiles, or the secret names of one'
+    'ls:same as list'
+    'import:import a .env file into a profile'
+    'export:print a profile in .env format'
     'run:run a command with secrets in its environment'
+    'profile:delete, rename or copy a profile'
+    'trust:directories trusted to use profiles'
+    'setup:install dependencies, create the key, set up completion'
+    'update:update a global npm install'
+    'completion:print the shell completion script'
+    'version:print the installed version'
   )
 
   if (( CURRENT == 2 )); then
@@ -34,44 +49,72 @@ _secenv() {
   fi
 
   case $words[2] in
+    set|get|rm)
+      [[ $words[2] == get && $PREFIX == -* ]] && { compadd -- --allow-pipe; return }
+      _secenv_addresses
+      ;;
     cp|mv)
-      (( CURRENT <= 4 )) && _secenv_profiles
-      ;;
-    set|list|ls|rm|get)
-      (( CURRENT == 3 )) && _secenv_profiles
-      ;;
-    profile|profiles)
-      if (( CURRENT == 3 )); then
-        _alternative \
-          'actions:action:((ls\:"list profiles" rm\:"delete a profile" mv\:"rename a profile" cp\:"copy a profile" export\:"print a profile in .env format" trust\:"manage directory approvals"))' \
-          'profiles:profile:_secenv_profiles'
-      elif (( CURRENT == 4 )) && [[ $words[3] == (rm|mv|cp|export) ]]; then
+      if [[ $PREFIX == -* ]]; then
+        compadd -- -f --force
+      elif (( CURRENT == 3 )); then
+        _secenv_addresses
+      elif (( CURRENT == 4 )); then
         _secenv_profiles
-      elif [[ $words[3] == export && $words[CURRENT-1] == --out ]]; then
+        _secenv_addresses
+      fi
+      ;;
+    list|ls)
+      if [[ $words[CURRENT-1] == --older-than ]]; then
+        _message 'period, e.g. 90d, 12w, 6m'
+      elif [[ $PREFIX == -* ]]; then
+        compadd -- --older-than
+      else
+        _secenv_profiles
+      fi
+      ;;
+    export)
+      if [[ $words[CURRENT-1] == --out ]]; then
         _files
-      elif (( CURRENT > 4 )) && [[ $words[3] == export ]]; then
-        _values 'option' '--out[write a 0600 file]' '--allow-pipe[allow writing into a pipe]'
-      elif (( CURRENT == 4 )) && [[ $words[3] == trust ]]; then
-        _values 'trust action' 'ls[list approved directories]' 'list[same as ls]' 'rm[revoke an approval]' 'prune[remove approvals of deleted directories]'
-      elif (( CURRENT == 5 )) && [[ $words[3] == trust ]]; then
-        case $words[4] in
-          ls|list) _secenv_profiles ;;
+      elif [[ $PREFIX == -* ]]; then
+        compadd -- --out --allow-pipe
+      else
+        _secenv_profiles
+      fi
+      ;;
+    import)
+      if [[ $words[CURRENT-1] == (-e|--env) ]]; then
+        _files
+      elif [[ $PREFIX == -* ]]; then
+        compadd -- -e --env --all --rewrite --no-rewrite
+      else
+        _secenv_profiles
+        _secenv_addresses
+      fi
+      ;;
+    profile)
+      if (( CURRENT == 3 )); then
+        _values 'action' 'rm[delete a profile]' 'mv[rename a profile]' 'cp[copy a profile]'
+      elif [[ $words[3] == rm && $PREFIX == -* ]]; then
+        compadd -- -y --yes
+      elif (( CURRENT == 4 )) || [[ $words[3] == cp && CURRENT -eq 5 ]]; then
+        _secenv_profiles
+      fi
+      ;;
+    trust)
+      if (( CURRENT == 3 )); then
+        _values 'action' 'ls[list trusted directories]' 'rm[revoke a directory]' 'prune[drop deleted directories]'
+      elif (( CURRENT == 4 )); then
+        case $words[3] in
+          ls) _secenv_profiles ;;
           rm) _directories ;;
         esac
       fi
       ;;
+    update)
+      compadd -- --check -y --yes
+      ;;
     completion)
       (( CURRENT == 3 )) && _values 'shell' zsh
-      ;;
-    import)
-      if (( CURRENT == 3 )); then
-        _secenv_profiles
-      elif [[ $words[CURRENT-1] == --only ]]; then
-        _message 'KEY,KEY'
-      else
-        _alternative 'files:file:_files' \
-          'options:option:(--all --only --rewrite --keep)'
-      fi
       ;;
     run)
       local i sep=0
@@ -83,13 +126,13 @@ _secenv() {
         words=("${(@)words[sep+1,-1]}")
         (( CURRENT -= sep ))
         _normal
-      elif [[ $words[CURRENT-1] == (--env|--public-env) ]]; then
+      elif [[ $words[CURRENT-1] == (-e|--env) ]]; then
         _files
+      elif [[ $PREFIX == -* ]]; then
+        compadd -- -e --env --no-env --
       else
-        # Profile names; the <profile>/KEY form is typed by hand (keys need Touch ID).
-        _alternative \
-          'profiles:profile:_secenv_profiles' \
-          'options:option:(--env --no-env --)'
+        _secenv_profiles
+        _secenv_addresses
       fi
       ;;
   esac

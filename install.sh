@@ -52,4 +52,4 @@ fi
 # Secure Enclave key (if there is none yet)
 "$BIN_DIR/secenv" init
 echo
-echo "Next: secenv set myapp OPENAI_API_KEY   (or secenv import myapp .env)"
+echo "Next: secenv set myapp/OPENAI_API_KEY   (or secenv import myapp)"

@@ -4,12 +4,50 @@ All notable changes to secenv. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.0] - 2026-10-19
+
+A cleanup of the command line: one form per action, one way to address a
+secret. Old forms are removed, not aliased.
+
+### Changed
+
+- A secret is addressed as `<profile>/NAME` everywhere, a bare `<profile>`
+  means the whole profile: `set`, `get`, `rm`, `cp`, `mv`, `import` and `run`.
+  `secenv set myapp KEY1 KEY2` becomes `secenv set myapp/KEY1 myapp/KEY2`, or
+  `secenv set myapp/{KEY1,KEY2}` with the shell expanding the braces. All items
+  of one command must be in one profile.
+- `export` and `trust` are top-level commands: `secenv export <profile>`,
+  `secenv trust ls|rm|prune` (was `secenv profile export`, `secenv profile
+  trust …`). `trust rm` without a directory revokes the current one. `profile`
+  keeps only `rm`, `mv` and `cp`.
+- Profiles are listed only by `secenv list` (or `ls`); `secenv profiles`,
+  `profile ls|list`, `profile <name>` and `trust list` are gone.
+- `import`: the file is given with `-e/--env <file>` (as in `run`) instead of
+  a second positional; `--only K,K` is replaced by `<profile>/NAME` items;
+  `--keep` is renamed `--no-rewrite`. Secrets that would be overwritten with a
+  different value are listed first.
+- `run`: several secrets are `<profile>/NAME` items as before; `-e` is short for
+  `--env`; the undocumented `--public-env` is removed.
+- `list --older 90d` is `list --older-than 90d` and also takes weeks and months
+  (`12w`, `6m`).
+- Short options: `-y` for `--yes` (`profile rm`, `update`), `-f/--force` for
+  `cp`/`mv`.
+- Wording: "trust" everywhere instead of "approval" ("is not trusted in …",
+  "Trust this directory to use …?"). `NAME` instead of `KEY` for a secret name,
+  so it is not confused with the Secure Enclave key.
+- `secenv --help` explains what a profile is and leaves `init` to `setup`.
 
 ### Added
 
+- `cp`/`mv -f` overwrite an existing secret (they still refuse by default).
 - `.agents/skills/secenv/SKILL.md`: a skill for AI coding agents working in a
   project that uses secenv.
+
+### Fixed
+
+- `rm` with a name that is not in the profile was reported as removed. It is
+  now an error and nothing is removed.
+- Unknown options are rejected instead of being taken for names.
 
 ## [0.7.0] - 2026-10-18
 
@@ -168,6 +206,7 @@ First published version.
 - `--public-env` for non-secret variables.
 - zsh completion, `install.sh` and `uninstall.sh`.
 
+[0.8.0]: https://github.com/gorets/secenv/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/gorets/secenv/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/gorets/secenv/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/gorets/secenv/compare/v0.6.0...v0.6.1

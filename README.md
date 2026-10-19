@@ -64,7 +64,7 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-npm i -g @vladimir.gorobets/secenv@0.7.0   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.8.0   # pin the version: this tool sees all your secrets
 secenv setup
 ```
 
@@ -76,7 +76,7 @@ secenv setup
 - installs the zsh completion into Homebrew's `site-functions`, or tells you to
   add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.7.0 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.8.0 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
@@ -90,7 +90,7 @@ secenv update           # confirm, then npm install -g <exact version>
 ```
 
 `update` never runs silently: it shows the version change, the release notes
-from [CHANGELOG.md](CHANGELOG.md) and a GitHub compare link, asks for confirmation (`--yes` without a terminal), and
+from [CHANGELOG.md](CHANGELOG.md) and a GitHub compare link, asks for confirmation (`-y` without a terminal), and
 installs that exact version. It also refreshes the zsh completion installed by
 `setup`. It works only for a global npm install; with `install.sh`, update with
 `git pull && ./install.sh`, and with `npx` or a project dependency, bump the
@@ -145,20 +145,24 @@ the wrapped command, so `sr npm run <Tab>` works as usual.
 
 ## Quick start
 
+A profile is the set of secrets one project needs (`myapp`, `myapp-staging`).
+Everywhere in the CLI, `myapp` means the whole profile and `myapp/NAME` one
+secret in it, the same form the `.env` references use (`secenv://myapp/NAME`).
+
 Verify the setup with a throwaway value before storing real keys:
 
 ```bash
-secenv set test FOO                              # type a value, input is hidden
+secenv set test/FOO                              # type a value, input is hidden
 secenv list test                                 # prints names only: FOO
 secenv run test -- sh -c 'echo "FOO=$FOO"'       # Touch ID prompt, then FOO=<value>
-secenv rm test FOO
+secenv rm test/FOO
 ```
 
 Then use it for real:
 
 ```bash
-# enter secrets (values are typed hidden)
-secenv set myapp OPENAI_API_KEY STRIPE_SECRET_KEY
+# enter secrets (values are typed hidden); the shell expands the braces
+secenv set myapp/{OPENAI_API_KEY,STRIPE_SECRET_KEY}
 
 # or import an existing .env: pick the keys, then let secenv replace their
 # values in the file with secenv:// references (the file becomes committable)
@@ -167,8 +171,8 @@ secenv import myapp
 # run a command with the secrets in its environment (Touch ID prompt)
 secenv run myapp -- node app.js
 
-# .env in the project is read automatically; values like secenv://KEY are
-# replaced with secrets, everything else is passed as is (see below)
+# .env in the project is read automatically; values like secenv://myapp/NAME
+# are replaced with secrets, everything else is passed as is (see below)
 secenv run -- node app.js
 
 # default profile for a project
@@ -185,57 +189,62 @@ In `package.json`:
 ## Commands
 
 Every command answers `--help` (`secenv run --help`, `secenv profile --help`).
+Unknown options are an error, so a typo is never taken for a name.
 
 | Command | Description |
 | --- | --- |
-| `secenv setup` | Install `age` + `age-plugin-se`, create the key, set up completion (for npm installs; safe to re-run) |
-| `secenv init` | Create the Secure Enclave key (once; `install.sh` and `setup` do this) |
-| `secenv completion zsh` | Print the zsh completion script |
-| `secenv update [--check] [--yes]` | Update a global npm install to the latest version (asks to confirm) |
-| `secenv --version` | Print the installed version |
-| `secenv set <profile> KEY [KEY...]` | Enter secret values (hidden input); updates existing keys |
-| `secenv import <profile> [<file>] [--all \| --only K,K] [--rewrite \| --keep]` | Import keys from a `.env` file (default `./.env`): interactive picker, then optionally rewrite the values as `secenv://` references |
-| `secenv profile ls` | List profiles; `secenv profiles` is an alias |
-| `secenv profile rm <name> [--yes]` | Delete a profile with all its secrets (asks to confirm) |
+| `secenv set <profile>/NAME...` | Enter secret values (hidden input); overwrites existing ones |
+| `secenv get <profile>/NAME [--allow-pipe]` | Print one secret value. Terminal only (see below) |
+| `secenv rm <profile>/NAME...` | Remove secrets; a name that is not there is an error and nothing is removed |
+| `secenv cp <profile>/NAME <profile>[/NAME] [-f]` | Copy one secret to another profile, optionally under a new name (one Touch ID per profile); `-f` overwrites |
+| `secenv mv <profile>/NAME <profile>[/NAME] [-f]` | Move one secret, or rename it inside a profile |
+| `secenv list [<profile>] [--older-than 90d]` | Without a profile: list profiles (no Touch ID). With one: its secret names with the dates they were added and last changed, never values; `--older-than` (`d`, `w`, `m`) keeps only secrets not changed for that long. `ls` is the same command |
+| `secenv import <profile>[/NAME...] [-e <file>] [--all] [--rewrite \| --no-rewrite]` | Import variables from a `.env` file (default `./.env`): interactive picker, or only the named ones, then optionally rewrite the values as `secenv://` references |
+| `secenv export <profile> [--out <file>] [--allow-pipe]` | Print a profile in `.env` format (terminal only), or write it to a `0600` file |
+| `secenv run [<profile> \| <profile>/NAME...] [-e <file> \| --no-env] -- <command...>` | Run a command with secrets in its environment; reads `./.env` by default |
+| `secenv profile rm <profile> [-y]` | Delete a profile with all its secrets (asks to confirm) |
 | `secenv profile mv <old> <new>` | Rename a profile |
 | `secenv profile cp <src> <dst>` | Copy a profile |
-| `secenv profile export <name> [--out <file>]` | Print a profile in `.env` format (terminal only), or write it to a `0600` file |
-| `secenv profile trust ls\|rm\|prune` | View and revoke directory approvals (see below) |
-| `secenv list [<profile>] [--older 90d]` | Without a profile: list profiles. With one: print its secret names with the dates they were added and last changed (never values); `--older` shows only secrets not changed for that many days. `ls` works everywhere `list` does, and `secenv profile <name>` does the same as `secenv list <name>` |
-| `secenv get <profile> KEY` | Print one secret value. Terminal only (see below) |
-| `secenv rm <profile> KEY [KEY...]` | Remove secrets from a profile |
-| `secenv cp <profile>/KEY <profile>[/KEY]` | Copy one secret to another profile, optionally under a new name (one Touch ID per profile) |
-| `secenv mv <profile>/KEY <profile>[/KEY]` | Move one secret, or rename it inside a profile |
-| `secenv run [<profile>] [--env <file>\|--no-env] -- <command...>` | Run a command with secrets in its environment; reads `./.env` by default |
+| `secenv trust ls [<profile>]` | Directories trusted to use profiles (see "Trusted directories") |
+| `secenv trust rm [<dir>]` | Revoke a directory (default: the current one) |
+| `secenv trust prune` | Drop entries of directories that no longer exist |
+| `secenv setup` | Install `age` + `age-plugin-se`, create the key, set up completion (for npm installs; safe to re-run) |
+| `secenv update [--check] [-y]` | Update a global npm install to the latest version (asks to confirm) |
+| `secenv completion zsh` | Print the zsh completion script |
+| `secenv version` | Print the installed version (also `-v`, `--version`) |
 
-`set`, `get` and `rm` also accept the `<profile>/KEY` form: `secenv set myapp/OPENAI_API_KEY`,
-`secenv get myapp/OPENAI_API_KEY`, `secenv rm myapp/OPENAI_API_KEY`.
+`secenv init` creates only the Secure Enclave key; `install.sh` and `setup` run it for you.
 
-A profile is a named set of secrets (for example `myapp`). Profile names
-may contain only letters, digits, `.`, `-` and `_`.
+All `<profile>/NAME` items in one command must be in the same profile: one
+profile is one decryption, one Touch ID. To name several secrets without
+repeating the profile, let the shell expand braces:
+`secenv rm myapp/{OLD_KEY,UNUSED_KEY}`.
+
+Profile names may contain only letters, digits, `.`, `-` and `_`; secret names
+are environment variable names (letters, digits, `_`, not starting with a digit).
 
 ### Managing profiles
 
-`ls`, `rm`, `mv` and `cp` work on the encrypted files directly, so none of them
-needs Touch ID:
+`list`, `profile rm`, `profile mv` and `profile cp` work on the encrypted files
+directly, so none of them needs Touch ID:
 
 ```bash
-secenv profile ls                       # myapp, myapp-staging, ...
-secenv profile cp myapp myapp-staging   # copy, then change a few keys with set
+secenv list                             # myapp, myapp-staging, ...
+secenv profile cp myapp myapp-staging   # copy, then change a few secrets with set
 secenv profile mv myapp-staging staging # rename
-secenv profile rm staging               # asks to confirm; --yes without a terminal
+secenv profile rm staging               # asks to confirm; -y without a terminal
 ```
 
-- `cp` and `mv` refuse to overwrite an existing profile.
-- `mv` lists the projects whose `.secenv` still names the old profile; update
-  those files yourself.
-- `rm` also drops the `.secenv` approvals for that profile, so a profile created
-  later under the same name has to be approved again.
+- `profile cp` and `profile mv` refuse to overwrite an existing profile.
+- `profile mv` lists the directories that were trusted with the old name;
+  update their `.secenv` files yourself.
+- `profile rm` also drops the trust entries for that profile, so a profile
+  created later under the same name has to be trusted again.
 
 #### Moving to a new Mac
 
 The Secure Enclave key cannot be moved, so the only way to carry secrets over is
-through plaintext. `profile export` prints a profile in `.env` format (Touch ID).
+through plaintext. `export` prints a profile in `.env` format (Touch ID).
 Like `get`, it writes only to a terminal. To write a file use `--out`, which
 creates it with mode `0600` and refuses to overwrite; a shell redirect would use
 your umask (usually `0644`, readable by every local account). A pipe needs an
@@ -243,9 +252,9 @@ explicit `--allow-pipe`.
 
 ```bash
 # old Mac
-secenv profile export myapp --out myapp.env
+secenv export myapp --out myapp.env
 # copy myapp.env over a channel you trust, then on the new Mac
-secenv import myapp myapp.env && rm myapp.env
+secenv import myapp -e myapp.env --all --no-rewrite && rm myapp.env
 ```
 
 Delete the file on both machines as soon as it is imported. If your secrets also
@@ -254,18 +263,21 @@ avoids the plaintext file altogether.
 
 ### Importing from `.env`
 
-`secenv import <profile>` reads `./.env` (or the file you name), shows a
+`secenv import <profile>` reads `./.env` (or the file given with `-e`), shows a
 checklist of its variables (space toggles, `a` toggles all, enter confirms) and
-stores the selected ones in the profile. Empty values (`KEY=`) and lines that
-are already `secenv://` references are skipped. It then offers to rewrite the file: the imported values
-are replaced with `secenv://<profile>/KEY`, every other line stays as it is, so
-the file holds no secrets and can be committed.
+stores the selected ones in the profile. Empty values (`NAME=`) and lines that
+are already `secenv://` references are skipped. Secrets that already exist in
+the profile with a different value are listed before they are overwritten. It
+then offers to rewrite the file: the imported values are replaced with
+`secenv://<profile>/NAME`, every other line stays as it is, so the file holds no
+secrets and can be committed.
 
 ```bash
-secenv import myai                        # picker, then "replace values? [y/N]"
-secenv import myai --only OPENAI_API_KEY  # no picker
-secenv import myai --all --rewrite        # no questions (also the non-TTY default for the selection)
-secenv import myai --keep                 # import, leave the file alone
+secenv import myai                            # picker, then "replace values? [y/N]"
+secenv import myai/OPENAI_API_KEY             # only this one, no picker
+secenv import myai --all --rewrite            # no questions (--all is also the non-TTY default)
+secenv import myai --no-rewrite               # import, leave the file alone
+secenv import myai -e .env.local              # another file
 ```
 
 Rewriting the file does not wipe the old bytes from the disk, so keys that were
@@ -273,7 +285,7 @@ ever stored in plaintext should still be rotated.
 
 ### Referencing secrets from `.env`
 
-`run` reads `./.env` in the current directory (or the file given with `--env`),
+`run` reads `./.env` in the current directory (or the file given with `-e`/`--env`),
 like dotenv. A value of the form `secenv://NAME` or `secenv://<profile>/NAME` is
 replaced with that secret from the profile; every other value is passed as it
 is. The file therefore contains no secrets and can be committed:
@@ -290,7 +302,7 @@ secenv run -- npm start          # profile myai comes from the references
 ```
 
 - When the references name a profile, no other profile source is needed.
-  `secenv://KEY` without a profile uses the run's profile (argument,
+  `secenv://NAME` without a profile uses the run's profile (argument,
   `SECENV_PROFILE` or `.secenv`).
 - References may point at several profiles. It works, but each profile is a
   separate decryption, so every run asks for Touch ID once per profile, and
@@ -308,15 +320,15 @@ secenv run -- npm start          # profile myai comes from the references
 
 ### Passing only some secrets
 
-By default `run` passes the whole profile. List `<profile>/KEY` items instead to
-give the command only those secrets (all items must use the same profile):
+By default `run` passes the whole profile. List `<profile>/NAME` items instead
+to give the command only those secrets (all items must use the same profile):
 
 ```bash
 secenv run myapp/OPENAI_API_KEY -- node script.js
-secenv run myapp/OPENAI_API_KEY myapp/STRIPE_SECRET_KEY -- node app.js
+secenv run myapp/{OPENAI_API_KEY,STRIPE_SECRET_KEY} -- node app.js
 ```
 
-A key missing from the profile is an error, so a typo does not silently start
+A name missing from the profile is an error, so a typo does not silently start
 the command without the secret.
 
 ### Choosing a profile
@@ -328,20 +340,20 @@ the command without the secret.
 3. the `.secenv` file in the current directory (one line, the profile name)
 
 Whatever the source, the first use of that profile in the current directory
-asks for approval (see "Directory approvals").
+asks whether to trust the directory with it (see "Trusted directories").
 
 ### Variable precedence
 
 When the same name appears in several places, the later one wins:
 
 1. your current shell environment
-2. the env file (`./.env` or `--env <file>`), references resolved
+2. the env file (`./.env` or `-e <file>`), references resolved
 3. the secret profile
 
 `PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*` and `LD_*` in the env file are
 ignored with a warning.
 
-### Directory approvals
+### Trusted directories
 
 The code you launch decides nothing; the directory you launch it from does. The
 first time `secenv run` uses a profile in a directory, however the profile was
@@ -350,7 +362,7 @@ named (argument, `SECENV_PROFILE` or `.secenv`), it asks on your terminal:
 ```
 secenv: first use of profile "myapp" (argument) in /path/to/project
   command: node app.js
-Allow this directory to use "myapp" from now on? [y/N]
+Trust this directory to use "myapp" from now on? [y/N]
 ```
 
 This matters because a cloned repository can put `secenv run myapp -- …`
@@ -361,38 +373,38 @@ directory, answer `n`. Before every decryption `run` also prints one line,
 `secenv: <profile> (<source>) -> <command>`, which is what you can check while
 the Touch ID dialog is up.
 
-Approvals are stored per directory in `~/.config/secenv/trusted.json` (realpath
-of the directory → list of profiles). The question is asked on `/dev/tty`, so it
+Trust is stored per directory in `~/.config/secenv/trusted.json` (realpath of
+the directory → list of profiles). The question is asked on `/dev/tty`, so it
 works even when stdin is a pipe feeding the command; without any terminal (CI)
-an unapproved run is refused. Approving your home directory or `/tmp` is a bad
-idea: a script can `cd` there.
+a run in an untrusted directory is refused. Trusting your home directory or
+`/tmp` is a bad idea: a script can `cd` there.
 
-To view or revoke approvals (no Touch ID):
+To view or revoke trust (no Touch ID):
 
 ```bash
-secenv profile trust ls            # every approved directory and its profiles
-secenv profile trust ls myapp      # only directories that may use myapp
-secenv profile trust rm .          # revoke the current directory (or pass a path)
-secenv profile trust prune         # drop approvals of deleted directories
+secenv trust ls            # every trusted directory and its profiles
+secenv trust ls myapp      # only directories that may use myapp
+secenv trust rm            # revoke the current directory (or pass a path)
+secenv trust prune         # drop entries of deleted directories
 ```
 
-Revoke an approval when you answered `y` too quickly, when the code in that
-folder is no longer something you trust (for example a different repository was
-cloned into the same path), or when the project is gone. `profile rm` revokes
-the approvals of the deleted profile by itself.
+Revoke trust when you answered `y` too quickly, when the code in that folder is
+no longer something you trust (for example a different repository was cloned
+into the same path), or when the project is gone. `profile rm` revokes the
+trust entries of the deleted profile by itself.
 
 ### Piping values
 
 A single value can be piped, including multi-line values such as private keys:
 
 ```bash
-cat key.pem | secenv set myapp PRIVATE_KEY
+cat key.pem | secenv set myapp/PRIVATE_KEY
 ```
 
-Several values can be piped, one line per key:
+Several values can be piped, one line per secret:
 
 ```bash
-printf 'value1\nvalue2\n' | secenv set myapp KEY1 KEY2
+printf 'value1\nvalue2\n' | secenv set myapp/{KEY1,KEY2}
 ```
 
 ## Files
@@ -404,7 +416,7 @@ Everything lives in `~/.config/secenv/` (override with `SECENV_HOME`):
 | `identity.txt` | Reference to the key in the Secure Enclave (not the key itself) |
 | `recipient.txt` | Public key used for encryption |
 | `profiles/*.age` | Encrypted secret sets, one per profile |
-| `trusted.json` | Projects whose `.secenv` you approved |
+| `trusted.json` | Directories trusted to use profiles |
 
 The zsh completion is installed separately, outside this directory (see above).
 
@@ -421,10 +433,10 @@ manager, not secenv.
 ### Viewing secrets
 
 ```bash
-secenv profile ls                  # profile names, no Touch ID
-secenv list myapp                  # secret names and dates, never values (Touch ID)
-secenv list myapp --older 90d      # secrets not rotated for 90 days
-secenv get myapp OPENAI_API_KEY    # the value (Touch ID); same as myapp/OPENAI_API_KEY
+secenv list                          # profile names, no Touch ID
+secenv list myapp                    # secret names and dates, never values (Touch ID)
+secenv list myapp --older-than 90d   # secrets not rotated for 90 days
+secenv get myapp/OPENAI_API_KEY      # the value (Touch ID)
 
 # check a value without printing it
 secenv run myapp -- sh -c 'echo "${#OPENAI_API_KEY} chars"'
@@ -439,7 +451,7 @@ for real keys.
 error:
 
 ```bash
-node index.js --key $(secenv get myapp OPENAI_API_KEY)    # refused
+node index.js --key $(secenv get myapp/OPENAI_API_KEY)    # refused
 ```
 
 A secret passed as a command-line argument is visible to every process of your
@@ -453,7 +465,7 @@ secenv run myapp -- sh -c 'node index.js --key "$OPENAI_API_KEY"'
 ```
 
 Better still, make the program read `process.env.OPENAI_API_KEY` and drop the
-flag. If you accept the risk, `secenv get --allow-pipe myapp KEY` prints the raw
+flag. If you accept the risk, `secenv get myapp/NAME --allow-pipe` prints the raw
 value without a trailing newline.
 
 Quote the command so the child process, not your shell, expands the variable.
@@ -477,8 +489,9 @@ its children can read the secrets from their environment (for example with `env`
   backed up or restored, and encrypted profiles become unreadable without it.
   Keep the real secret values in your primary store (a password manager) and treat secenv as
   a working copy.
-- Touch ID is requested on every `secenv run` and `get` (and on `set`,
-  `import`, `list` and `rm` for an existing profile).
+- Touch ID is requested on every `secenv run`, `get` and `export` (and on
+  `set`, `import`, `list <profile>`, `rm`, `cp` and `mv` for an existing
+  profile).
 - Re-running `secenv init` after deleting `identity.txt` creates a new key and
   **old profiles can no longer be decrypted.**
 - A secret passed to a child process is visible to that process and everything
@@ -488,7 +501,7 @@ its children can read the secrets from their environment (for example with `env`
   approves Touch ID themselves. It only prevents reading secrets without your
   fingerprint, and keeps them out of plaintext files and shell history.
 - Only run `secenv run` with commands you trust. The launched code receives the
-  secrets. The directory approval and the `secenv: <profile> -> <command>` line
+  secrets. The directory trust prompt and the `secenv: <profile> -> <command>` line
   exist so that you notice when a repository's script asks for a profile you did
   not expect; they are not a sandbox.
 - `age` and `age-plugin-se` are run from fixed system directories
@@ -503,18 +516,20 @@ its children can read the secrets from their environment (for example with `env`
 | `key not created. Run: secenv init` | Run `secenv init` |
 | `"age" not found in /opt/homebrew/bin, /usr/local/bin, …` | secenv looks for `age` and `age-plugin-se` only in those directories, never in `PATH`; `brew install age age-plugin-se`, or set `SECENV_TOOL_DIRS` if they live elsewhere |
 | `could not decrypt (Touch ID cancelled or key does not match)` | Retry and approve Touch ID; if the key was recreated, the old profile is unrecoverable, so delete it and re-enter the secrets |
-| `profile "<name>" not found` | Create it with `secenv set <name> KEY` |
-| `profile "…" (…) is not approved for … and there is no terminal to ask` | Run it once from a terminal and answer `y` (approvals are per directory) |
+| `profile "<name>" not found` | Create it with `secenv set <name>/NAME` |
+| `profile "…" (…) is not trusted in … and there is no terminal to ask` | Run it once from a terminal and answer `y` (trust is per directory) |
+| `expected <profile>/NAME, got "myapp"` | Secrets are addressed as `myapp/NAME`; a bare `myapp` means the whole profile |
+| `all secrets in one command must be in one profile` | Split the command, one profile each |
 | `invalid profile name in .../.secenv` | The file must contain one line with a profile name (letters, digits, `.`, `-`, `_`) |
 | `refusing to print a secret into a pipe or $(...)` | Use `secenv run <profile> -- sh -c '...'` so the child shell expands the variable, or add `--allow-pipe` if you accept the `ps` exposure |
-| `--env requires a file` | Pass the file: `--env .env.public` |
+| `--env requires a value` | Pass the file: `-e .env.public` |
 | `SyntaxError` / "To load an ES module" when running `secenv` | Node is older than 22 (20.19+ also works); upgrade Node |
 | Node reports `<file>: not found` for `--env-file` | The secenv flag is `--env`; Node intercepts `--env-file` itself. Inside your own `node` scripts, drop `--env-file=.env`: secenv already loaded it |
 | A command killed by a signal | `secenv run` exits with `128 + signal number` (for example 143 for SIGTERM), like a shell would |
 
 ## For AI coding agents
 
-[`.agents/skills/secenv/SKILL.md`](.agents/skills/secenv/SKILL.md) teaches coding agents how to work in a project that uses secenv: run commands through `secenv run`, batch Touch ID prompts, leave storing secrets and approving directories to the human, and never print values. Copy it into a project's `.agents/skills/` (or your agent's skills directory) to use it there.
+[`.agents/skills/secenv/SKILL.md`](.agents/skills/secenv/SKILL.md) teaches coding agents how to work in a project that uses secenv: run commands through `secenv run`, batch Touch ID prompts, leave storing secrets and trusting directories to the human, and never print values. Copy it into a project's `.agents/skills/` (or your agent's skills directory) to use it there.
 
 ## Uninstall
 
