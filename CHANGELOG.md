@@ -13,6 +13,17 @@ All notable changes to secenv. The format follows
   references become the values, secrets the file neither sets nor references
   are appended, every other line stays. The file is set to mode `0600`.
 
+### Fixed
+
+- `export` wrote every value in double quotes with `\"` escapes. Node's
+  `--env-file` cut such a value at the escaped quote, and Docker Compose
+  expanded `$VAR` inside it. Values are now written unquoted when they hold
+  only `A-Za-z0-9-_.:/+=@,%~`, otherwise in single quotes, which every common
+  reader takes literally. A value with a single quote stays unquoted unless it
+  also holds `#`, `$`, a line break or edge spaces; only then double quotes,
+  and export names such a value if it also holds `"`, `\` or `$`. Checked
+  against secenv, Node `--env-file`, Docker Compose and python-dotenv.
+
 ## [0.8.1] - 2026-10-19
 
 ### Added

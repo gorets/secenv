@@ -273,11 +273,11 @@ secenv export vgcloud --out .env
 
 ```
 # before                                  # after
-PBX_SECRET=secenv://vgcloud/PBX_SECRET    PBX_SECRET="…the value…"
-DB_URL=secenv://DB_URL                    DB_URL="…the value…"
+PBX_SECRET=secenv://vgcloud/PBX_SECRET    PBX_SECRET=sk-live-4f9a…
+DB_URL=secenv://DB_URL                    DB_URL='postgres://u:p@h/db?ssl=true&x=1'
 OTHER=secenv://other/X                    OTHER=secenv://other/X      (another profile)
 MODEL=gpt-4.1                             MODEL=gpt-4.1
-                                          NEW_SECRET="…the value…"    (appended)
+                                          NEW_SECRET=…                (appended)
 ```
 
 - References to the exported profile, and bare `secenv://NAME` ones, become
@@ -290,6 +290,19 @@ MODEL=gpt-4.1                             MODEL=gpt-4.1
   mode `0600`.
 - The `.env` that `import` turned into references is often committed. After
   an export it holds plaintext: do not commit it (`git diff` shows the values).
+
+Values are written so that secenv, Node's `--env-file`, Docker Compose and
+python-dotenv all read them back unchanged: without quotes when they hold only
+letters, digits and `-_.:/+=@,%~` (typical API keys), otherwise in single
+quotes, which are literal everywhere (`#`, `$`, spaces and `"` stay as they
+are). A value with a single quote stays unquoted (quotes inside an unquoted
+value are literal too) unless it also holds `#`, `$`, a line break, spaces at
+either end or starts with a quote; only then is it double-quoted with escapes.
+Multi-line values such as PEM keys are double-quoted with `\n`, which all four
+read back. The one case no quoting fixes, a value that needs double quotes and
+also holds `"`, `\` or `$`, is named by export: Node and Compose read it
+differently. python-dotenv expands `${VAR}` even in
+single quotes unless it is called with `interpolate=False`.
 
 To turn the values back into references, `secenv import vgcloud -e .env
 --rewrite`. Rotate keys if the plaintext file may have been copied anywhere.

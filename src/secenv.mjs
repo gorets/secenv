@@ -415,8 +415,46 @@ export function parseDotenv(text) {
   return out;
 }
 
-const quoteDotenv = (v) =>
-  `"${String(v).replace(/[\\"\n\r]/g, (c) => ({ '\\': '\\\\', '"': '\\"', '\n': '\\n', '\r': '\\r' })[c])}"`;
+// Values are written so that every common reader (secenv, Node's --env-file,
+// Docker Compose, python-dotenv, dotenv) gets them back unchanged:
+// - unquoted when they consist of characters no reader treats specially, which
+//   covers typical API keys and tokens (sk-ant-api03-...);
+// - otherwise in single quotes, which are literal: no escapes, no $VAR
+//   expansion, # is not a comment, spaces are kept;
+// - a value with a single quote cannot be single-quoted, but unquoted quotes
+//   inside a value are read literally too, so it stays unquoted unless it
+//   holds what breaks unquoted values: # (a comment to Node), $ (expanded by
+//   Compose), a line break, spaces at either end, or a quote at the start;
+// - only then double quotes with escapes. Inside them readers disagree on \",
+//   \\ and $ (Node stops at \", Compose expands $VAR), so values that also
+//   hold those are reported by warnDoubleQuoted.
+const PLAIN_VALUE = /^[A-Za-z0-9_\-.:\/+=@,%~]*$/;
+function quoteKind(v) {
+  const s = String(v);
+  if (PLAIN_VALUE.test(s)) return 'plain';
+  if (!/['\n\r]/.test(s)) return 'single';
+  if (!/[#$\n\r]/.test(s) && s === s.trim() && !/^['"`]/.test(s)) return 'plain';
+  return 'double';
+}
+const ambiguousQuoted = (v) => quoteKind(v) === 'double' && /["\\$]/.test(String(v));
+const quoteDotenv = (v) => {
+  const s = String(v);
+  const kind = quoteKind(s);
+  if (kind === 'plain') return s;
+  if (kind === 'single') return `'${s}'`;
+  return `"${s.replace(/[\\"\n\r]/g, (c) => ({ '\\': '\\\\', '"': '\\"', '\n': '\\n', '\r': '\\r' })[c])}"`;
+};
+
+// Warns about variables written double-quoted (see quoteDotenv).
+function warnDoubleQuoted(odd) {
+  if (odd.length) {
+    process.stderr.write(
+      `secenv: ${odd.join(', ')}: the value mixes a single quote with " \\ or $ and also holds # $, a line break ` +
+        'or spaces at the ends, so no quoting suits every reader: secenv and python-dotenv read it back exactly, ' +
+        'Node --env-file and Docker Compose may not.\n',
+    );
+  }
+}
 
 export function formatDotenv(data) {
   return Object.keys(data)
@@ -430,7 +468,7 @@ export function formatDotenv(data) {
 // secrets the file neither sets nor references are appended, every other line stays
 // as it is. A variable the file already sets to a plain value is kept.
 export function mergeDotenv(text, profile, values) {
-  const report = { replaced: [], appended: [], kept: [], missing: [] };
+  const report = { replaced: [], appended: [], kept: [], missing: [], doubleQuoted: [] };
   const seen = new Set();
   const lines = text.split(/\r?\n/).map((line) => {
     const m = line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=/);
@@ -446,6 +484,7 @@ export function mergeDotenv(text, profile, values) {
         return line;
       }
       report.replaced.push(key);
+      if (ambiguousQuoted(values[ref[2]])) report.doubleQuoted.push(key);
       seen.add(ref[2]); // referenced under another name: not appended again
       return `${m[1]}${key}=${quoteDotenv(values[ref[2]])}`;
     }
@@ -458,6 +497,7 @@ export function mergeDotenv(text, profile, values) {
     for (const k of extra) lines.push(`${k}=${quoteDotenv(values[k])}`);
     lines.push('');
     report.appended = extra;
+    report.doubleQuoted.push(...extra.filter((k) => ambiguousQuoted(values[k])));
   }
   return { text: lines.join('\n'), ...report };
 }
@@ -861,6 +901,7 @@ function cmdExport(args) {
   const values = secretValues(data);
   if (merge) return mergeExport(out, name, values);
   const text = formatDotenv(values);
+  warnDoubleQuoted(Object.keys(values).filter((k) => ambiguousQuoted(values[k])));
   if (out) {
     // A shell redirect would use the umask (usually 0644); open the file here.
     try {
@@ -878,7 +919,8 @@ function cmdExport(args) {
 }
 
 function mergeExport(file, profile, values) {
-  const { text, replaced, appended, kept, missing } = mergeDotenv(fs.readFileSync(file, 'utf8'), profile, values);
+  const { text, replaced, appended, kept, missing, doubleQuoted } = mergeDotenv(fs.readFileSync(file, 'utf8'), profile, values);
+  warnDoubleQuoted(doubleQuoted);
   const wide = (fs.statSync(file).mode & 0o077) !== 0;
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
