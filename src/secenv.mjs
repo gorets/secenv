@@ -42,7 +42,7 @@ Secrets
   mv <profile>/NAME <profile>[/NAME] [-f]
                                      move or rename one secret
   list [<profile>] [--older-than 90d]
-                                     profiles, or one profile's secret names (ls)
+                                     profiles, or one profile's secrets, masked (ls)
 
 Import / export
   import <profile>[/NAME...] [-e <file>]
@@ -157,9 +157,12 @@ On the new Mac: secenv import myapp -e myapp.env && rm myapp.env`,
 
   list: `usage: secenv list [<profile>] [--older-than <n>d|w|m]   (also: ls)
 
-Without a profile: lists the profiles (no Touch ID). With one: prints the
-names of its secrets with the dates they were added and last changed, never
-the values (Touch ID). In a pipe it prints the names only.
+Without a profile: lists the profiles (no Touch ID). With one: prints its
+secrets (Touch ID) with a masked preview to tell tokens apart, the start and
+the last 4 characters as provider consoles show them (sk-ant-api03-cxx****cQAA),
+and the dates they were added and last changed. Values shorter than 24
+characters or spanning several lines show only their size. In a pipe it prints
+the names only.
 
   --older-than 90d   only secrets whose value has not changed for 90 days
                      (d, w or m; a rotation check). Secrets with no known
@@ -903,6 +906,20 @@ function cmdTrust(args) {
 
 const PERIOD_DAYS = { d: 1, w: 7, m: 30 };
 
+// Enough of a value to tell which token it is, in the style provider consoles
+// use (sk-ant-api03-cxx****cQAA): the start, which usually names the provider
+// and the key type, and the last 4 characters, which consoles show to identify
+// a key. At most a third of the value is revealed, so at least 16 characters
+// stay hidden; shorter values (passwords, PINs) and multi-line ones (PEM keys)
+// show only their size.
+export function maskValue(value) {
+  const v = String(value);
+  if (v.includes('\n')) return `(${v.split('\n').length} lines)`;
+  if (v.length < 24) return `(${v.length} char${v.length === 1 ? '' : 's'})`;
+  const head = Math.min(16, Math.floor(v.length / 3) - 4);
+  return `${v.slice(0, head)}****${v.slice(-4)}`;
+}
+
 function cmdList(args) {
   const { opts, pos } = parseArgs('list', args, { '--older-than': ['olderThan'] });
   let olderDays;
@@ -928,9 +945,11 @@ function cmdList(args) {
   }
   if (!process.stdout.isTTY) return keys.forEach((k) => console.log(k)); // names only for scripts
   const width = Math.max(0, ...keys.map((k) => k.length));
+  const previews = Object.fromEntries(keys.map((k) => [k, maskValue(data[k].value)]));
+  const pwidth = Math.max(0, ...keys.map((k) => previews[k].length));
   for (const k of keys) {
     const e = data[k];
-    console.log(`${k.padEnd(width)}   added ${day(e.added)}   updated ${day(e.updated)}`);
+    console.log(`${k.padEnd(width)}   ${previews[k].padEnd(pwidth)}   added ${day(e.added)}   updated ${day(e.updated)}`);
   }
   if (!keys.length && olderDays !== undefined) process.stderr.write(`No secrets older than ${olderDays} days in "${name}".\n`);
 }

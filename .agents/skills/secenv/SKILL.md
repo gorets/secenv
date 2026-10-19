@@ -25,7 +25,7 @@ MODEL=gpt-4.1                                 # plain value, passed as is
 |---|---|---|
 | Run anything that needs secrets | `secenv run -- npm run check` | yes |
 | List profiles | `secenv ls` | no |
-| Key names and change dates in a profile | `secenv ls myai` | yes |
+| Key names and change dates in a profile | `secenv ls myai` (a pipe gets names only; the masked previews are for the human's terminal) | yes |
 | Keys not rotated for 90 days | `secenv ls myai --older-than 90d` | yes |
 | Check a key without printing it | `secenv run -- node -e 'const k=process.env.OPENAI_API_KEY||""; console.log(!k ? "missing" : k.startsWith("secenv://") ? "unresolved" : "set, length " + k.length)'` | yes |
 | Pass a secret as a CLI flag | `secenv run -- sh -c 'node seed.mjs --api-key "$OPENAI_API_KEY"'` (single quotes) | yes |

@@ -64,7 +64,7 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-npm i -g @vladimir.gorobets/secenv@0.8.0   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.8.1   # pin the version: this tool sees all your secrets
 secenv setup
 ```
 
@@ -76,7 +76,7 @@ secenv setup
 - installs the zsh completion into Homebrew's `site-functions`, or tells you to
   add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.8.0 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.8.1 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
@@ -198,7 +198,7 @@ Unknown options are an error, so a typo is never taken for a name.
 | `secenv rm <profile>/NAME...` | Remove secrets; a name that is not there is an error and nothing is removed |
 | `secenv cp <profile>/NAME <profile>[/NAME] [-f]` | Copy one secret to another profile, optionally under a new name (one Touch ID per profile); `-f` overwrites |
 | `secenv mv <profile>/NAME <profile>[/NAME] [-f]` | Move one secret, or rename it inside a profile |
-| `secenv list [<profile>] [--older-than 90d]` | Without a profile: list profiles (no Touch ID). With one: its secret names with the dates they were added and last changed, never values; `--older-than` (`d`, `w`, `m`) keeps only secrets not changed for that long. `ls` is the same command |
+| `secenv list [<profile>] [--older-than 90d]` | Without a profile: list profiles (no Touch ID). With one: its secret names with a masked preview (`sk-ant-api03-cxx****cQAA`) and the dates they were added and last changed; `--older-than` (`d`, `w`, `m`) keeps only secrets not changed for that long. `ls` is the same command |
 | `secenv import <profile>[/NAME...] [-e <file>] [--all] [--rewrite \| --no-rewrite]` | Import variables from a `.env` file (default `./.env`): interactive picker, or only the named ones, then optionally rewrite the values as `secenv://` references |
 | `secenv export <profile> [--out <file>] [--allow-pipe]` | Print a profile in `.env` format (terminal only), or write it to a `0600` file |
 | `secenv run [<profile> \| <profile>/NAME...] [-e <file> \| --no-env] -- <command...>` | Run a command with secrets in its environment; reads `./.env` by default |
@@ -434,13 +434,29 @@ manager, not secenv.
 
 ```bash
 secenv list                          # profile names, no Touch ID
-secenv list myapp                    # secret names and dates, never values (Touch ID)
+secenv list myapp                    # names, masked previews and dates (Touch ID)
 secenv list myapp --older-than 90d   # secrets not rotated for 90 days
 secenv get myapp/OPENAI_API_KEY      # the value (Touch ID)
 
 # check a value without printing it
 secenv run myapp -- sh -c 'echo "${#OPENAI_API_KEY} chars"'
 ```
+
+`list <profile>` in a terminal looks like this:
+
+```
+ANTHROPIC_API_KEY   sk-ant-api03-cxx****cQAA   added 2026-10-18   updated 2026-10-18
+DB_PASSWORD         (14 chars)                 added 2026-10-18   updated 2026-10-19
+PRIVATE_KEY         (28 lines)                 added 2026-10-18   updated 2026-10-18
+```
+
+The preview is the start of the value, which usually names the provider and
+the key type, and its last 4 characters, which provider consoles show to
+identify a key: match it against the key list in the console to find the one to
+rotate. It reveals at most a third of the value and keeps at least 16
+characters hidden; values shorter than 24 characters (passwords, PINs) and
+multi-line values show only their size. The preview is computed when listing,
+nothing extra is stored, and in a pipe `list` prints names only.
 
 The printed value stays in your terminal scrollback, so prefer the length check
 for real keys.
