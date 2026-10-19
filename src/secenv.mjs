@@ -150,10 +150,17 @@ Rewriting does not wipe the old bytes from the disk: rotate keys that matter.`,
 Prints a profile in .env format (Touch ID), for example to move it to a new
 Mac: the Secure Enclave key cannot be moved, so plaintext is the only way.
 
-  --out <file>    write a new file with mode 0600 instead (refuses to overwrite)
+  --out <file>    write a file with mode 0600 instead (see below)
   --allow-pipe    allow writing into a pipe
 
-On the new Mac: secenv import myapp -e myapp.env && rm myapp.env`,
+--out with a new file writes the whole profile. With an existing file it fills
+it in: secenv://<profile>/NAME and bare secenv://NAME references become the
+values, secrets the file neither sets nor references are appended, every other
+line stays as it is (a variable already set to a plain value is kept). The file
+is set to mode 0600. Do not commit it afterwards.
+
+  secenv export myapp --out myapp.env      # new Mac: secenv import myapp -e myapp.env
+  secenv export myapp --out .env           # fill the project's .env`,
 
   list: `usage: secenv list [<profile>] [--older-than <n>d|w|m]   (also: ls)
 
@@ -408,13 +415,51 @@ export function parseDotenv(text) {
   return out;
 }
 
+const quoteDotenv = (v) =>
+  `"${String(v).replace(/[\\"\n\r]/g, (c) => ({ '\\': '\\\\', '"': '\\"', '\n': '\\n', '\r': '\\r' })[c])}"`;
+
 export function formatDotenv(data) {
-  const quote = (v) =>
-    `"${v.replace(/[\\"\n\r]/g, (c) => ({ '\\': '\\\\', '"': '\\"', '\n': '\\n', '\r': '\\r' })[c])}"`;
   return Object.keys(data)
     .sort()
-    .map((k) => `${k}=${quote(String(data[k]))}\n`)
+    .map((k) => `${k}=${quoteDotenv(data[k])}\n`)
     .join('');
+}
+
+// Fills an existing dotenv file with a profile's values: a reference to the
+// profile (secenv://<profile>/NAME, or a bare secenv://NAME) becomes the value,
+// secrets the file neither sets nor references are appended, every other line stays
+// as it is. A variable the file already sets to a plain value is kept.
+export function mergeDotenv(text, profile, values) {
+  const report = { replaced: [], appended: [], kept: [], missing: [] };
+  const seen = new Set();
+  const lines = text.split(/\r?\n/).map((line) => {
+    const m = line.match(/^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!m) return line;
+    const key = m[2];
+    seen.add(key);
+    const value = parseDotenv(line)[key] ?? '';
+    const ref = value.match(SECRET_REF);
+    if (ref) {
+      if (ref[1] && ref[1] !== profile) return line; // another profile's secret
+      if (!(ref[2] in values)) {
+        report.missing.push(key);
+        return line;
+      }
+      report.replaced.push(key);
+      seen.add(ref[2]); // referenced under another name: not appended again
+      return `${m[1]}${key}=${quoteDotenv(values[ref[2]])}`;
+    }
+    if (key in values && value !== values[key]) report.kept.push(key);
+    return line;
+  });
+  const extra = Object.keys(values).filter((k) => !seen.has(k)).sort();
+  if (extra.length) {
+    if (lines.length && lines[lines.length - 1] === '') lines.pop();
+    for (const k of extra) lines.push(`${k}=${quoteDotenv(values[k])}`);
+    lines.push('');
+    report.appended = extra;
+  }
+  return { text: lines.join('\n'), ...report };
 }
 
 // ---------- age helpers ----------
@@ -811,14 +856,17 @@ function cmdExport(args) {
         'if you really need a pipe, add --allow-pipe.',
     );
   }
+  const merge = out && fs.existsSync(out);
   const data = loadProfile(name, { mustExist: true });
-  const text = formatDotenv(secretValues(data));
+  const values = secretValues(data);
+  if (merge) return mergeExport(out, name, values);
+  const text = formatDotenv(values);
   if (out) {
     // A shell redirect would use the umask (usually 0644); open the file here.
     try {
       fs.writeFileSync(out, text, { mode: 0o600, flag: 'wx' });
     } catch (e) {
-      die(e.code === 'EEXIST' ? `${out} already exists` : `could not write ${out}: ${e.message}`);
+      die(`could not write ${out}: ${e.message}`);
     }
     process.stderr.write(`Wrote ${Object.keys(data).length} secrets from "${name}" to ${out} in plaintext (mode 0600). Delete it after use.\n`);
     return;
@@ -827,6 +875,22 @@ function cmdExport(args) {
   if (!process.stdout.isTTY) {
     process.stderr.write(`Exported ${Object.keys(data).length} secrets from "${name}" in plaintext. Delete the output after use.\n`);
   }
+}
+
+function mergeExport(file, profile, values) {
+  const { text, replaced, appended, kept, missing } = mergeDotenv(fs.readFileSync(file, 'utf8'), profile, values);
+  const wide = (fs.statSync(file).mode & 0o077) !== 0;
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
+  fs.renameSync(tmp, file);
+  const say = (label, keys) => keys.length && process.stderr.write(`  ${label}: ${keys.join(', ')}\n`);
+  process.stderr.write(`Filled ${file} with secrets from "${profile}" in plaintext:\n`);
+  say('replaced references', replaced);
+  say('appended', appended);
+  say('kept existing values (differ from the profile)', kept);
+  say(`references to secrets not in "${profile}", left as they are`, missing);
+  if (!replaced.length && !appended.length) process.stderr.write('  nothing to change\n');
+  process.stderr.write(`Mode is now 0600${wide ? ' (it was readable by other users)' : ''}. Delete the plaintext after use, or turn it back into references: secenv import ${profile} -e ${file} --rewrite\n`);
 }
 
 // Trusted directories (directory -> profiles), see approveRun.

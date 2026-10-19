@@ -4,6 +4,15 @@ All notable changes to secenv. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.2] - 2026-10-19
+
+### Added
+
+- `secenv export <profile> --out <file>` with an existing file fills it in
+  instead of refusing: `secenv://<profile>/NAME` and bare `secenv://NAME`
+  references become the values, secrets the file neither sets nor references
+  are appended, every other line stays. The file is set to mode `0600`.
+
 ## [0.8.1] - 2026-10-19
 
 ### Added
@@ -217,6 +226,7 @@ First published version.
 - `--public-env` for non-secret variables.
 - zsh completion, `install.sh` and `uninstall.sh`.
 
+[0.8.2]: https://github.com/gorets/secenv/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/gorets/secenv/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/gorets/secenv/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/gorets/secenv/compare/v0.6.2...v0.7.0

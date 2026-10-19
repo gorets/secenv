@@ -64,7 +64,7 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-npm i -g @vladimir.gorobets/secenv@0.8.1   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.8.2   # pin the version: this tool sees all your secrets
 secenv setup
 ```
 
@@ -76,7 +76,7 @@ secenv setup
 - installs the zsh completion into Homebrew's `site-functions`, or tells you to
   add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.8.1 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.8.2 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
@@ -200,7 +200,7 @@ Unknown options are an error, so a typo is never taken for a name.
 | `secenv mv <profile>/NAME <profile>[/NAME] [-f]` | Move one secret, or rename it inside a profile |
 | `secenv list [<profile>] [--older-than 90d]` | Without a profile: list profiles (no Touch ID). With one: its secret names with a masked preview (`sk-ant-api03-cxx****cQAA`) and the dates they were added and last changed; `--older-than` (`d`, `w`, `m`) keeps only secrets not changed for that long. `ls` is the same command |
 | `secenv import <profile>[/NAME...] [-e <file>] [--all] [--rewrite \| --no-rewrite]` | Import variables from a `.env` file (default `./.env`): interactive picker, or only the named ones, then optionally rewrite the values as `secenv://` references |
-| `secenv export <profile> [--out <file>] [--allow-pipe]` | Print a profile in `.env` format (terminal only), or write it to a `0600` file |
+| `secenv export <profile> [--out <file>] [--allow-pipe]` | Print a profile in `.env` format (terminal only), write it to a new `0600` file, or fill the references of an existing one (see "Exporting into an existing `.env`") |
 | `secenv run [<profile> \| <profile>/NAME...] [-e <file> \| --no-env] -- <command...>` | Run a command with secrets in its environment; reads `./.env` by default |
 | `secenv profile rm <profile> [-y]` | Delete a profile with all its secrets (asks to confirm) |
 | `secenv profile mv <old> <new>` | Rename a profile |
@@ -246,9 +246,9 @@ secenv profile rm staging               # asks to confirm; -y without a terminal
 The Secure Enclave key cannot be moved, so the only way to carry secrets over is
 through plaintext. `export` prints a profile in `.env` format (Touch ID).
 Like `get`, it writes only to a terminal. To write a file use `--out`, which
-creates it with mode `0600` and refuses to overwrite; a shell redirect would use
-your umask (usually `0644`, readable by every local account). A pipe needs an
-explicit `--allow-pipe`.
+creates it with mode `0600`; a shell redirect would use your umask (usually
+`0644`, readable by every local account). A pipe needs an explicit
+`--allow-pipe`.
 
 ```bash
 # old Mac
@@ -260,6 +260,39 @@ secenv import myapp -e myapp.env --all --no-rewrite && rm myapp.env
 Delete the file on both machines as soon as it is imported. If your secrets also
 live in a password manager, re-entering them with `secenv set` on the new Mac
 avoids the plaintext file altogether.
+
+#### Exporting into an existing `.env`
+
+Some tools cannot be started through `secenv run` (a Docker Compose file, an
+IDE run configuration, a tool that reads `.env` itself). For them,
+`export --out` with an existing file fills it in instead of refusing:
+
+```bash
+secenv export vgcloud --out .env
+```
+
+```
+# before                                  # after
+PBX_SECRET=secenv://vgcloud/PBX_SECRET    PBX_SECRET="…the value…"
+DB_URL=secenv://DB_URL                    DB_URL="…the value…"
+OTHER=secenv://other/X                    OTHER=secenv://other/X      (another profile)
+MODEL=gpt-4.1                             MODEL=gpt-4.1
+                                          NEW_SECRET="…the value…"    (appended)
+```
+
+- References to the exported profile, and bare `secenv://NAME` ones, become
+  the values. References to other profiles and secrets missing from the
+  profile are left as they are and listed.
+- Secrets the file neither sets nor references are appended at the end.
+- A variable the file already sets to a plain value is kept and listed if it
+  differs from the profile.
+- Comments, order and every other line stay as they are; the file becomes
+  mode `0600`.
+- The `.env` that `import` turned into references is often committed. After
+  an export it holds plaintext: do not commit it (`git diff` shows the values).
+
+To turn the values back into references, `secenv import vgcloud -e .env
+--rewrite`. Rotate keys if the plaintext file may have been copied anywhere.
 
 ### Importing from `.env`
 
