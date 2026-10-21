@@ -1,6 +1,6 @@
 {
   "name": "@vladimir.gorobets/secenv",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Personal secrets for local development, encrypted with age and a Mac Secure Enclave key (Touch ID)",
   "type": "module",
   "bin": {

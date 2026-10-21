@@ -1608,7 +1608,11 @@ async function cmdUpdate(args) {
     if (!process.stdin.isTTY) die('refusing to update without a terminal; add -y');
     if (!(await confirm(`Install ${pkg.name}@${latest}?`))) die('cancelled');
   }
-  const install = spawnSync('npm', ['install', '-g', '--ignore-scripts', `${pkg.name}@${latest}`], { stdio: 'inherit' });
+  // --prefer-online: npm's cached metadata can predate a release that the
+  // registry check above already sees, and npm then reports ETARGET.
+  const install = spawnSync('npm', ['install', '-g', '--ignore-scripts', '--prefer-online', `${pkg.name}@${latest}`], {
+    stdio: 'inherit',
+  });
   if (install.status !== 0) die('npm install failed');
   refreshBrewCompletion();
   console.log(`✓ secenv ${latest} installed`);
