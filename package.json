@@ -1,16 +1,19 @@
 {
   "name": "@vladimir.gorobets/secenv",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "Personal secrets for local development, encrypted with age and a Mac Secure Enclave key (Touch ID)",
   "type": "module",
   "bin": {
-    "secenv": "src/secenv.mjs",
-    "claude:skill:install": "cp -r .agents/skills/secenv ~/.claude/skills/secenv"
+    "secenv": "src/secenv.mjs"
   },
   "files": [
     "src",
+    ".agents",
     "CHANGELOG.md"
   ],
+  "scripts": {
+    "test": "node --test"
+  },
   "engines": {
     "node": ">=18"
   },

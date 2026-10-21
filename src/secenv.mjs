@@ -23,6 +23,7 @@ const TRUSTED = path.join(HOME, 'trusted.json');
 // script and installs the completion itself.
 const COMPLETION_FILE = fileURLToPath(new URL('./completions/_secenv', import.meta.url));
 const PACKAGE_FILE = fileURLToPath(new URL('../package.json', import.meta.url));
+const SKILL_FILE = fileURLToPath(new URL('../.agents/skills/secenv/SKILL.md', import.meta.url));
 const REGISTRY = (process.env.SECENV_REGISTRY || 'https://registry.npmjs.org').replace(/\/$/, '');
 
 const USAGE = `secenv — personal secrets encrypted with a Secure Enclave key (Touch ID)
@@ -67,6 +68,7 @@ Setup
   setup                              install age + plugin, create the key, completion
   update [--check] [-y]              update a global npm install (asks to confirm)
   completion zsh                     print the zsh completion script
+  skill install [<dir>] [-f]         install the skill for AI coding agents (~/.claude/skills)
   version                            print the installed version
 
 Several secrets of one profile: secenv set myapp/{OPENAI_API_KEY,STRIPE_KEY}
@@ -110,6 +112,18 @@ asks for confirmation and installs that exact version with
 
   --check      only report; install nothing
   -y, --yes    do not ask (for scripts)`,
+
+  skill: `usage: secenv skill install [<dir>] [-f]
+
+Copies the secenv skill for AI coding agents (.agents/skills/secenv/SKILL.md
+in the package) to <dir>/secenv/SKILL.md. Default <dir>: ~/.claude/skills.
+The skill teaches an agent to run commands through \`secenv run\`, batch
+Touch ID prompts, and leave secrets and trust decisions to you.
+
+  -f, --force   overwrite an existing SKILL.md
+
+  secenv skill install                   # ~/.claude/skills/secenv/SKILL.md
+  secenv skill install .agents/skills    # into the current project`,
 
   version: `usage: secenv version   (also -v, --version)
 
@@ -287,10 +301,39 @@ function ensureDir(dir) {
 }
 
 const PROFILE_NAME = /^[A-Za-z0-9._-]+$/;
-const UNSAFE_PUBLIC_ENV = /^(PATH|NODE_OPTIONS|NODE_PATH|DYLD_.*|LD_.*)$/;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// Plain variables an env file may not set: they choose which binary runs, what
+// gets loaded into it, which startup files a shell reads, or where a tool's
+// own config (and its credential helpers) comes from. The list is best effort;
+// the variables a file sets are also part of the directory trust (approveRun).
+const UNSAFE_PUBLIC_ENV =
+  /^(PATH|HOME|SHELL|ENV|BASH_ENV|ZDOTDIR|SHELLOPTS|PS4|PROMPT_COMMAND|NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_TLS_REJECT_UNAUTHORIZED|NODE_REPL_EXTERNAL_MODULE|PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PYTHONUSERBASE|PERL5LIB|PERL5OPT|PERL5DB|RUBYOPT|RUBYLIB|GIT_.*|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|DOCKER_CONFIG|DOCKER_HOST|DYLD_.*|LD_.*|.*_PROXY|.*_proxy)$/;
 // CSI and OSC sequences, then any remaining control character except newline.
 const TERMINAL_CONTROL = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x09\x0b-\x1f\x7f]/g;
 const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+
+// Text that comes from a repository (command arguments, file names) is shown
+// in the trust prompt and in messages. Control characters and invisible
+// Unicode could redraw the line or hide part of it (ESC [2K CR "node app.js"
+// after the real command shows only "node app.js"), so they are made visible,
+// and arguments holding whitespace or quotes are quoted the way a shell would.
+const INVISIBLE = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+export function visible(s) {
+  return String(s).replace(INVISIBLE, (c) => {
+    if (c === '\n') return '\\n';
+    if (c === '\r') return '\\r';
+    if (c === '\t') return '\\t';
+    if (c === '\x1b') return '\\e';
+    const code = c.charCodeAt(0);
+    return code < 0x100 ? `\\x${code.toString(16).padStart(2, '0')}` : `\\u${code.toString(16).padStart(4, '0')}`;
+  });
+}
+export function showArg(s) {
+  const v = visible(s);
+  if (v !== String(s) || v === '' || /[\s'"\\$`]/.test(v)) return `'${v.replace(/'/g, "'\\''")}'`;
+  return v;
+}
+export const showCommand = (cmd) => cmd.map(showArg).join(' ');
 
 function profileFile(name) {
   if (!name || !PROFILE_NAME.test(name) || name === '.' || name === '..') {
@@ -828,7 +871,7 @@ function existingProfileFile(name) {
 
 function trustedDirsFor(name) {
   return Object.entries(readTrusted())
-    .filter(([, list]) => list.includes(name))
+    .filter(([, entry]) => name in entry)
     .map(([dir]) => dir);
 }
 
@@ -845,8 +888,8 @@ async function cmdProfileRm(name, yes) {
   const dirs = trustedDirsFor(name);
   if (dirs.length) {
     for (const dir of dirs) {
-      trusted[dir] = trusted[dir].filter((p) => p !== name);
-      if (!trusted[dir].length) delete trusted[dir];
+      delete trusted[dir][name];
+      if (!Object.keys(trusted[dir]).length) delete trusted[dir];
     }
     writeTrusted(trusted);
   }
@@ -938,15 +981,16 @@ function mergeExport(file, profile, values) {
 // Trusted directories (directory -> profiles), see approveRun.
 function cmdTrustLs(profile) {
   const entries = Object.entries(readTrusted())
-    .filter(([, list]) => !profile || list.includes(profile))
+    .filter(([, entry]) => !profile || profile in entry)
     .sort(([a], [b]) => a.localeCompare(b));
   if (!entries.length) {
     process.stderr.write('No trusted directories.\n');
     return;
   }
-  for (const [dir, list] of entries) {
+  for (const [dir, entry] of entries) {
     const gone = !fs.existsSync(dir);
-    console.log(`${dir}  ->  ${list.join(', ')}${gone ? '  (directory gone, run: secenv trust prune)' : ''}`);
+    const list = Object.entries(entry).map(([p, keys]) => (keys?.length ? `${p} (env file sets: ${keys.join(', ')})` : p));
+    console.log(`${visible(dir)}  ->  ${list.join(', ')}${gone ? '  (directory gone, run: secenv trust prune)' : ''}`);
   }
 }
 
@@ -955,10 +999,10 @@ function cmdTrustRm(target = '.') {
   let dir = path.resolve(target);
   if (!(dir in trusted) && fs.existsSync(dir)) dir = fs.realpathSync(dir);
   if (!(dir in trusted)) die(`not trusted: ${dir}`);
-  const list = trusted[dir];
+  const list = Object.keys(trusted[dir]);
   delete trusted[dir];
   writeTrusted(trusted);
-  console.log(`Revoked: ${dir} can no longer use ${list.map((p) => `"${p}"`).join(', ')} without asking.`);
+  console.log(`Revoked: ${visible(dir)} can no longer use ${list.map((p) => `"${p}"`).join(', ')} without asking.`);
 }
 
 // Drops approvals whose directory is gone, so a different project cloned into
@@ -1124,23 +1168,36 @@ function cmdRm(args) {
 
 // The profile in ./.secenv decides which secrets the launched code receives, so
 // a cloned repository must not make that choice silently. The "directory ->
-// profile" binding is remembered after explicit confirmation.
-// trusted.json: { "<realpath of directory>": ["profile", ...] }. Older files
-// stored a single string per directory; both shapes are read.
-function readTrusted() {
-  let raw;
-  try {
-    raw = JSON.parse(fs.readFileSync(TRUSTED, 'utf8'));
-  } catch {
-    return {};
-  }
+// profile" binding is remembered after explicit confirmation, together with
+// the plain variables the env file set at that time: the file comes from the
+// repository too, and what it sets reaches the command (see approveRun).
+// trusted.json: { "<realpath of directory>": { "<profile>": ["VAR", ...] } }.
+// Older files stored a string or a list of profiles per directory; both are
+// read, with the variables unknown (null) until the next run binds them.
+export function normalizeTrusted(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const out = {};
   for (const [dir, v] of Object.entries(raw)) {
-    const list = (Array.isArray(v) ? v : [v]).filter((x) => typeof x === 'string' && PROFILE_NAME.test(x));
-    if (list.length) out[dir] = list;
+    const entry = {};
+    if (typeof v === 'string' || Array.isArray(v)) {
+      for (const p of [v].flat()) if (typeof p === 'string' && PROFILE_NAME.test(p) && p !== '.' && p !== '..') entry[p] = null;
+    } else if (v && typeof v === 'object') {
+      for (const [p, keys] of Object.entries(v)) {
+        if (!PROFILE_NAME.test(p) || p === '.' || p === '..') continue;
+        entry[p] = Array.isArray(keys) ? keys.filter((k) => typeof k === 'string' && ENV_NAME.test(k)).sort() : null;
+      }
+    }
+    if (Object.keys(entry).length) out[dir] = entry;
   }
   return out;
+}
+
+function readTrusted() {
+  try {
+    return normalizeTrusted(JSON.parse(fs.readFileSync(TRUSTED, 'utf8')));
+  } catch {
+    return {};
+  }
 }
 
 function writeTrusted(trusted) {
@@ -1163,7 +1220,10 @@ async function confirm(question) {
     }
   }
   const rl = readline.createInterface({ input, output: process.stderr });
-  const answer = await new Promise((resolve) => rl.question(`${question} [y/N] `, resolve));
+  const answer = await new Promise((resolve) => {
+    rl.question(`${question} [y/N] `, resolve);
+    rl.on('close', () => resolve('')); // EOF (terminal closed): no answer is "no"
+  });
   rl.close();
   if (fd !== null) {
     input.destroy();
@@ -1184,25 +1244,42 @@ function projectProfile() {
 // Every `run` needs an approval of (directory, profile), whatever named the
 // profile: a repository's package.json script can pass the profile as an
 // argument just as easily as through .secenv, and the Touch ID dialog shows
-// neither the profile nor the command.
-async function approveRun(profile, source, cmd) {
+// neither the profile nor the command. The plain variables the env file sets
+// are part of the approval: the file comes from the repository as well, and a
+// variable such as BASH_ENV or AWS_CONFIG_FILE changes what the shown command
+// loads. New variables ask again; removed ones are forgotten silently.
+async function approveRun(profile, source, cmd, envKeys, envShown) {
   const dir = fs.realpathSync(process.cwd());
   const trusted = readTrusted();
-  if (trusted[dir]?.includes(profile)) return;
+  const known = trusted[dir]?.[profile]; // undefined: not trusted; null: trusted before 0.9, variables unknown
+  const keys = [...envKeys].sort();
+  const added = known ? keys.filter((k) => !known.includes(k)) : keys;
+  if (known !== undefined && !added.length) {
+    if (known === null || known.length !== keys.length) {
+      trusted[dir][profile] = keys;
+      writeTrusted(trusted);
+    }
+    return;
+  }
 
-  const question =
-    `secenv: first use of profile "${profile}" (${source}) in ${dir}\n` +
-    `  command: ${cmd.join(' ')}\n` +
-    `Trust this directory to use "${profile}" from now on?`;
-  const ok = await confirm(question);
+  const lines = [
+    known === undefined
+      ? `secenv: first use of profile "${profile}" (${source}) in ${visible(dir)}`
+      : `secenv: profile "${profile}" (${source}) is trusted in ${visible(dir)}, but ${envShown} now sets variables it did not before`,
+    `  command: ${showCommand(cmd)}`,
+  ];
+  if (keys.length) lines.push(`  ${envShown} also sets: ${keys.join(', ')}${known ? `  (new: ${added.join(', ')})` : ''}`);
+  lines.push(`Trust this directory to use "${profile}"${known === undefined ? '' : ' with these variables'} from now on?`);
+  const ok = await confirm(lines.join('\n'));
   if (ok === null) {
     die(
-      `profile "${profile}" (${source}) is not trusted in ${dir} and there is no terminal to ask. ` +
-        'Run it once interactively.',
+      `profile "${profile}" (${source}) is not trusted in ${visible(dir)}` +
+        (known === undefined ? '' : ` with the variables ${envShown} now sets (${added.join(', ')})`) +
+        ' and there is no terminal to ask. Run it once interactively.',
     );
   }
   if (!ok) die('cancelled');
-  trusted[dir] = [...(trusted[dir] ?? []), profile];
+  trusted[dir] = { ...(trusted[dir] ?? {}), [profile]: keys };
   writeTrusted(trusted);
 }
 
@@ -1244,14 +1321,17 @@ async function cmdRun(args) {
   }
 
   // Env file: --env <file>, else ./.env when present (like dotenv), unless --no-env.
-  if (envFile && !fs.existsSync(envFile)) die(`--env: file not found: ${envFile}`);
+  if (envFile && !fs.existsSync(envFile)) die(`--env: file not found: ${showArg(envFile)}`);
   if (!envFile && !noEnv && fs.existsSync('.env')) envFile = '.env';
-  const { refs, plain } = envFile ? splitReferences(parseDotenv(fs.readFileSync(envFile, 'utf8')), envFile) : { refs: {}, plain: {} };
+  // The file name may come from a repository script too: show it safely.
+  const envShown = envFile ? showArg(envFile) : null;
+  const { refs, plain } = envFile ? splitReferences(parseDotenv(fs.readFileSync(envFile, 'utf8')), envShown) : { refs: {}, plain: {} };
   // An env file may come from the repository; it must not decide which binary
-  // runs or what gets loaded into it.
+  // runs or what gets loaded into it. What it does set is shown in the trust
+  // prompt and remembered with the approval (approveRun).
   const dropped = Object.keys(plain).filter((k) => UNSAFE_PUBLIC_ENV.test(k));
   for (const k of dropped) delete plain[k];
-  if (dropped.length) process.stderr.write(`secenv: ignoring ${dropped.join(', ')} from ${envFile}\n`);
+  if (dropped.length) process.stderr.write(`secenv: ignoring ${dropped.join(', ')} from ${envShown}\n`);
 
   let source = 'argument';
   if (!profile && process.env.SECENV_PROFILE) {
@@ -1260,7 +1340,7 @@ async function cmdRun(args) {
   }
   if (!profile) {
     profile = projectProfile();
-    source = profile ? '.secenv' : `${envFile} reference`;
+    source = profile ? '.secenv' : `${envShown} reference`;
   }
   // References may name a profile themselves: KEY=secenv://myapp/NAME. The
   // main profile (argument, SECENV_PROFILE, .secenv) serves references without
@@ -1269,10 +1349,10 @@ async function cmdRun(args) {
   const bare = Object.values(refs).some((r) => !r.profile);
   if (!profile && refProfiles.length === 1) {
     profile = refProfiles[0];
-    source = `${envFile} reference`;
+    source = `${envShown} reference`;
   }
   if (!profile && refProfiles.length > 1 && bare) {
-    die(`${envFile} mixes secenv://KEY with references to several profiles; name the profile in every reference or pass one`);
+    die(`${envShown} mixes secenv://KEY with references to several profiles; name the profile in every reference or pass one`);
   }
   if (!profile && !refProfiles.length) {
     die('no profile specified (argument, SECENV_PROFILE, .secenv or secenv://<profile>/KEY in .env)');
@@ -1285,7 +1365,7 @@ async function cmdRun(args) {
   if (only) {
     const outside = Object.values(refs).filter((r) => r.profile !== profile || !only.includes(r.name));
     if (outside.length) {
-      die(`${envFile} references secrets outside the allowed list: ${outside.map((r) => `${r.profile}/${r.name}`).join(', ')}`);
+      die(`${envShown} references secrets outside the allowed list: ${outside.map((r) => `${r.profile}/${r.name}`).join(', ')}`);
     }
     wanted.set(profile, only);
   } else if (Object.keys(refs).length) {
@@ -1301,17 +1381,18 @@ async function cmdRun(args) {
   const profiles = [...wanted.keys()];
   if (profiles.length > 1) {
     process.stderr.write(
-      `secenv: warning: ${envFile} references ${profiles.length} profiles (${profiles.join(', ')}). ` +
+      `secenv: warning: ${envShown} references ${profiles.length} profiles (${profiles.join(', ')}). ` +
         `Each one is a separate decryption, so expect ${profiles.length} Touch ID prompts per run. ` +
         'Prefer one profile per project: secenv set myapp/NAME, or secenv import myapp.\n',
     );
   }
 
   // All approvals first, then the decryptions: no prompts between Touch ID dialogs.
-  for (const name of profiles) await approveRun(name, name === profile ? source : `${envFile} reference`, cmd);
+  const plainKeys = Object.keys(plain);
+  for (const name of profiles) await approveRun(name, name === profile ? source : `${envShown} reference`, cmd, plainKeys, envShown);
   // The Touch ID dialog carries no context; this line is what the user can check.
   const shown = profiles.map((name) => (wanted.get(name) ? `${name}/${wanted.get(name).join(',')}` : name)).join(' ');
-  process.stderr.write(`secenv: ${shown} (${source}) -> ${cmd.join(' ')}\n`);
+  process.stderr.write(`secenv: ${shown} (${source}) -> ${showCommand(cmd)}\n`);
 
   const loaded = new Map();
   for (const name of profiles) {
@@ -1327,13 +1408,16 @@ async function cmdRun(args) {
   if (only) for (const k of only) secrets[k] = loaded.get(profile)[k];
   else if (!Object.keys(refs).length) Object.assign(secrets, loaded.get(profile));
   for (const [k, r] of Object.entries(refs)) secrets[k] = loaded.get(r.profile)[r.name];
-  const env = { ...process.env, ...plain, ...secrets };
+  // Like dotenv: a variable already set in the shell wins over the file's plain
+  // value, so a repository file cannot override the user's environment. The
+  // secrets come last: they are what the run asked for.
+  const env = { ...plain, ...process.env, ...secrets };
 
   const child = spawn(cmd[0], cmd.slice(1), { env, stdio: 'inherit' });
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(sig, () => child.kill(sig));
   }
-  child.on('error', (e) => die(`could not start "${cmd[0]}": ${e.message}`));
+  child.on('error', (e) => die(`could not start ${showArg(cmd[0])}: ${e.message}`));
   child.on('exit', (code, signal) => {
     // Conventional shell exit code for a signal death; re-raising the signal
     // would hit our own forwarding handler above and exit with 0.
@@ -1399,6 +1483,23 @@ async function cmdSetup() {
     console.log('• zsh completion: add to ~/.zshrc after compinit:');
     console.log('    source <(secenv completion zsh)');
   }
+}
+
+// ---------- skill for AI coding agents ----------
+
+function cmdSkill(args) {
+  const [action, ...rest] = args;
+  const { opts, pos } = parseArgs('skill', rest, { '-f': 'force', '--force': 'force' }, action);
+  if (action !== 'install') usageError('skill', action ? `unknown action: ${action}` : 'missing action (install)');
+  if (pos.length > 1) usageError('skill', `unexpected argument: ${pos[1]}`);
+  if (!fs.existsSync(SKILL_FILE)) {
+    die('skill file not found next to secenv (install.sh copies only the CLI). Copy .agents/skills/secenv from the repository checkout instead.');
+  }
+  const dst = path.join(path.resolve(pos[0] ?? path.join(os.homedir(), '.claude', 'skills')), 'secenv', 'SKILL.md');
+  if (fs.existsSync(dst) && !opts.force) die(`${dst} already exists; add -f to overwrite it`);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.copyFileSync(SKILL_FILE, dst);
+  console.log(`Installed the secenv skill: ${dst}`);
 }
 
 // ---------- version and update ----------
@@ -1543,6 +1644,9 @@ if (isMain) {
       break;
     case 'completion':
       cmdCompletion(rest[0]);
+      break;
+    case 'skill':
+      cmdSkill(rest);
       break;
     case 'set':
       await cmdSet(rest);

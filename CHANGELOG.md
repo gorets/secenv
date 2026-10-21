@@ -4,6 +4,57 @@ All notable changes to secenv. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-10-21
+
+### Security
+
+Fixes from the 2026-10-21 security review:
+
+- The trust prompt and the `secenv: <profile> -> <command>` line showed the
+  command's arguments raw. A `package.json` script could include terminal
+  control bytes (`\u001b[2K\r`) in an argument, so the terminal cleared the
+  real command and displayed `node app.js` instead; the Touch ID dialog shows
+  no context of its own. Control characters and invisible Unicode are now
+  printed visibly (`\e`, `\r`, `\u202e`) and arguments holding whitespace,
+  quotes or such characters are quoted. The env file name in messages gets the
+  same treatment.
+- The plain variables an env file sets are now part of the directory trust:
+  the prompt lists them, `trusted.json` stores them per profile, and `run`
+  asks again, naming the new variables, when the file starts setting one it
+  did not set before (`trust ls` shows them). The file comes from the
+  repository too, and `BASH_ENV`, `ZDOTDIR`, `AWS_CONFIG_FILE` or an
+  `HTTPS_PROXY` change what the approved command loads or talks to. Those and
+  similar variables (`HOME`, `SHELL`, `NODE_EXTRA_CA_CERTS`, `PYTHONPATH`,
+  `PERL5OPT`, `GIT_*`, `DOCKER_CONFIG`, `*_PROXY`, …) are also refused
+  outright, in addition to `PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*`,
+  `LD_*`.
+- Plain env-file values no longer override variables already set in the shell
+  (dotenv semantics); secrets still do.
+- A closed terminal (or ctrl-D) at a `[y/N]` question now means "no" and exits
+  with "cancelled" instead of leaving the process hanging on an unsettled
+  promise.
+
+### Changed
+
+- `trusted.json` format: directory → profile → list of env-file variables.
+  Files from 0.4–0.8 are read; a directory trusted before is asked once more
+  if its env file sets plain variables, otherwise upgraded silently.
+- Precedence: env file (plain) < shell < profile. Previously the file beat the
+  shell.
+
+### Added
+
+- `secenv skill install [<dir>] [-f]`: copies the skill for AI coding agents to
+  `<dir>/secenv/SKILL.md` (default `~/.claude/skills`). The skill is now
+  shipped in the npm package.
+- `npm test`: unit tests for the display helpers and `trusted.json` parsing.
+
+### Fixed
+
+- The `claude:skill:install` entry added to `bin` in the previous commit was
+  not a file path, so npm dropped it silently, and `.agents/` was not in the
+  package at all.
+
 ## [0.8.2] - 2026-10-19
 
 ### Added

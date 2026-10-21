@@ -40,6 +40,7 @@ _secenv() {
     'setup:install dependencies, create the key, set up completion'
     'update:update a global npm install'
     'completion:print the shell completion script'
+    'skill:install the skill for AI coding agents'
     'version:print the installed version'
   )
 
@@ -115,6 +116,15 @@ _secenv() {
       ;;
     completion)
       (( CURRENT == 3 )) && _values 'shell' zsh
+      ;;
+    skill)
+      if (( CURRENT == 3 )); then
+        _values 'action' 'install[copy SKILL.md for AI coding agents]'
+      elif [[ $PREFIX == -* ]]; then
+        compadd -- -f --force
+      else
+        _directories
+      fi
       ;;
     run)
       local i sep=0

@@ -64,7 +64,7 @@ again. It is safe to re-run.
 ### Install via npm (alternative)
 
 ```bash
-npm i -g @vladimir.gorobets/secenv@0.8.2   # pin the version: this tool sees all your secrets
+npm i -g @vladimir.gorobets/secenv@0.9.0   # pin the version: this tool sees all your secrets
 secenv setup
 ```
 
@@ -76,7 +76,7 @@ secenv setup
 - installs the zsh completion into Homebrew's `site-functions`, or tells you to
   add `source <(secenv completion zsh)` to `~/.zshrc` (after `compinit`).
 
-Or run without installing: `npx @vladimir.gorobets/secenv@0.8.2 run myapp -- node app.js`. `npx`
+Or run without installing: `npx @vladimir.gorobets/secenv@0.9.0 run myapp -- node app.js`. `npx`
 checks the package on every call, so for daily use a global install (or a
 `devDependency` in your project) is faster. Pin a version either way, so that an
 update to the package cannot silently change the code that handles your
@@ -211,6 +211,7 @@ Unknown options are an error, so a typo is never taken for a name.
 | `secenv setup` | Install `age` + `age-plugin-se`, create the key, set up completion (for npm installs; safe to re-run) |
 | `secenv update [--check] [-y]` | Update a global npm install to the latest version (asks to confirm) |
 | `secenv completion zsh` | Print the zsh completion script |
+| `secenv skill install [<dir>] [-f]` | Copy the skill for AI coding agents to `<dir>/secenv/SKILL.md` (default `~/.claude/skills`) |
 | `secenv version` | Print the installed version (also `-v`, `--version`) |
 
 `secenv init` creates only the Secure Enclave key; `install.sh` and `setup` run it for you.
@@ -357,9 +358,14 @@ secenv run -- npm start          # profile myai comes from the references
 - When a file contains references, the command receives only the referenced
   secrets (under the names on the left-hand side), not the whole profile. A
   reference to a missing secret is an error.
-- `PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*` and `LD_*` in the file are
-  ignored with a warning: the file may come from the repository, and it must not
-  decide which binary runs or what gets loaded into it.
+- Plain values never override a variable already set in your shell (like
+  dotenv), and the file cannot set variables that choose which binary runs or
+  what it loads: `PATH`, `HOME`, `SHELL`, `BASH_ENV`, `ZDOTDIR`, `NODE_OPTIONS`,
+  `NODE_PATH`, `NODE_EXTRA_CA_CERTS`, `PYTHONPATH`, `PERL5OPT`, `GIT_*`,
+  `AWS_CONFIG_FILE`, `DOCKER_CONFIG`, `*_PROXY`, `DYLD_*`, `LD_*` and a few
+  more are ignored with a warning. That list is best effort; the real control
+  is that the plain variables the file sets are part of the directory trust
+  (see "Trusted directories").
 - `--no-env` skips the file. Drop `--env-file=.env` from your `node` scripts:
   Node would fail on a file it cannot find, and the variables are already in the
   environment.
@@ -392,12 +398,13 @@ asks whether to trust the directory with it (see "Trusted directories").
 
 When the same name appears in several places, the later one wins:
 
-1. your current shell environment
-2. the env file (`./.env` or `-e <file>`), references resolved
-3. the secret profile
+1. the env file (`./.env` or `-e <file>`), plain values
+2. your current shell environment
+3. the secret profile (and the references resolved from the env file)
 
-`PATH`, `NODE_OPTIONS`, `NODE_PATH`, `DYLD_*` and `LD_*` in the env file are
-ignored with a warning.
+So, as with dotenv, a variable you set in the shell beats the file, and the
+secrets you asked for beat both. Variables such as `PATH`, `BASH_ENV` or
+`NODE_OPTIONS` in the env file are ignored with a warning (see above).
 
 ### Trusted directories
 
@@ -408,19 +415,29 @@ named (argument, `SECENV_PROFILE` or `.secenv`), it asks on your terminal:
 ```
 secenv: first use of profile "myapp" (argument) in /path/to/project
   command: node app.js
+  .env also sets: PORT, LOG_LEVEL
 Trust this directory to use "myapp" from now on? [y/N]
 ```
 
 This matters because a cloned repository can put `secenv run myapp -- …`
 into its `package.json` just as easily as a profile name into `.secenv`, and the
-Touch ID dialog shows neither the profile nor the command. Read the two lines
-before answering: if you did not expect that profile or that command in that
-directory, answer `n`. Before every decryption `run` also prints one line,
-`secenv: <profile> (<source>) -> <command>`, which is what you can check while
-the Touch ID dialog is up.
+Touch ID dialog shows neither the profile nor the command. Read the lines
+before answering: if you did not expect that profile, that command or those
+variables in that directory, answer `n`. Before every decryption `run` also
+prints one line, `secenv: <profile> (<source>) -> <command>`, which is what you
+can check while the Touch ID dialog is up. Both show the command with control
+characters made visible (`\e`, `\r`) and odd arguments quoted, so a script
+cannot redraw the line to hide what it runs.
+
+The plain variables the env file sets are part of the trust, because that file
+comes from the repository too and the command receives them. When the file
+starts setting a variable it did not set before, `run` asks again and names
+the new one; variables that disappear are forgotten silently.
 
 Trust is stored per directory in `~/.config/secenv/trusted.json` (realpath of
-the directory → list of profiles). The question is asked on `/dev/tty`, so it
+the directory → profile → the variables the env file was allowed to set; the
+older list-of-profiles format is still read and upgraded, asking once if the
+file sets anything). The question is asked on `/dev/tty`, so it
 works even when stdin is a pipe feeding the command; without any terminal (CI)
 a run in an untrusted directory is refused. Trusting your home directory or
 `/tmp` is a bad idea: a script can `cd` there.
@@ -462,7 +479,7 @@ Everything lives in `~/.config/secenv/` (override with `SECENV_HOME`):
 | `identity.txt` | Reference to the key in the Secure Enclave (not the key itself) |
 | `recipient.txt` | Public key used for encryption |
 | `profiles/*.age` | Encrypted secret sets, one per profile |
-| `trusted.json` | Directories trusted to use profiles |
+| `trusted.json` | Directories trusted to use profiles, with the env-file variables each was allowed to set |
 
 The zsh completion is installed separately, outside this directory (see above).
 
@@ -580,6 +597,7 @@ its children can read the secrets from their environment (for example with `env`
 | `could not decrypt (Touch ID cancelled or key does not match)` | Retry and approve Touch ID; if the key was recreated, the old profile is unrecoverable, so delete it and re-enter the secrets |
 | `profile "<name>" not found` | Create it with `secenv set <name>/NAME` |
 | `profile "…" (…) is not trusted in … and there is no terminal to ask` | Run it once from a terminal and answer `y` (trust is per directory) |
+| `… is not trusted in … with the variables .env now sets (NAME) …` | The env file started setting `NAME`; run it once from a terminal, check the variable is expected, answer `y` |
 | `expected <profile>/NAME, got "myapp"` | Secrets are addressed as `myapp/NAME`; a bare `myapp` means the whole profile |
 | `all secrets in one command must be in one profile` | Split the command, one profile each |
 | `invalid profile name in .../.secenv` | The file must contain one line with a profile name (letters, digits, `.`, `-`, `_`) |
@@ -591,7 +609,23 @@ its children can read the secrets from their environment (for example with `env`
 
 ## For AI coding agents
 
-[`.agents/skills/secenv/SKILL.md`](.agents/skills/secenv/SKILL.md) teaches coding agents how to work in a project that uses secenv: run commands through `secenv run`, batch Touch ID prompts, leave storing secrets and trusting directories to the human, and never print values. Copy it into a project's `.agents/skills/` (or your agent's skills directory) to use it there.
+[`.agents/skills/secenv/SKILL.md`](.agents/skills/secenv/SKILL.md) teaches coding agents how to work in a project that uses secenv: run commands through `secenv run`, batch Touch ID prompts, leave storing secrets and trusting directories to the human, and never print values. The npm package ships it; install it for Claude Code with
+
+```bash
+secenv skill install                  # ~/.claude/skills/secenv/SKILL.md
+secenv skill install .agents/skills   # or into the current project
+```
+
+The same skill installs with the [skills CLI](https://github.com/vercel-labs/skills)
+for any agent it supports (Claude Code, Codex, Cursor, …), straight from this
+repository:
+
+```bash
+npx skills add gorets/secenv -a claude-code      # into the current project
+npx skills add gorets/secenv -g -a claude-code   # or globally
+```
+
+With `install.sh` and no npm, copy `.agents/skills/secenv` from the checkout.
 
 ## Uninstall
 
